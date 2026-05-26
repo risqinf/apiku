@@ -44,9 +44,10 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             cross: true
-          # macOS Intel
+          # macOS Intel (cross-compiled from Apple Silicon runner — much
+          # shorter queue than dedicated Intel macos-13 runners)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             archive: tar.gz
             cross: false
           # macOS Apple Silicon
@@ -104,7 +105,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Strip binary
-        if: runner.os != 'Windows' && !matrix.cross
+        if: runner.os != 'Windows' && !matrix.cross && matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: |
           strip "target/${{ matrix.target }}/release/${BIN_NAME}" || true
