@@ -1,0 +1,2062 @@
+//! RESTful API v1.
+//!
+//! Every endpoint returns the same JSON envelope:
+//!
+//! ```json
+//! {
+//!   "status": 200,
+//!   "ok": true,
+//!   "data": { ... },
+//!   "meta": { "took_ms": 123, "cached": false, "request_id": "1f8b2c4d-..." }
+//! }
+//! ```
+//!
+//! Errors share the shape with `ok: false` and an `error` object:
+//!
+//! ```json
+//! { "status": 404, "ok": false, "error": { "code": "not_found", "message": "..." }, "meta": { ... } }
+//! ```
+//!
+//! ## Endpoint families
+//!
+//! - `health` / `info`                          - liveness + server metadata
+//! - `search`                                   - cross-provider search
+//! - `browse`                                   - per-provider home / popular / latest feeds
+//! - `manga` / `donghua` / `novel` / `nhentai`  - series detail (with paged chapter list)
+//! - `manga/chapter` / `donghua/episode`
+//!   `novel/chapter` / `nhentai/chapter`        - leaf content (pages, video servers, text body)
+//! - `cosplay`                                  - photoset / gallery post
+//! - `img`                                      - HMAC-signed image proxy
+//!
+//! ## Resource IDs
+//!
+//! All IDs are opaque, HMAC-SHA256-signed tokens. See `opaque.rs` for the wire format.
+//! Image URLs in responses are rewritten to `/img?p=...&s=...` (see `img_proxy`).
+
+use crate::engine::ScraperEngine;
+use crate::fingerprint::BrowserFingerprint;
+use crate::models::{
+    ChapterInfo, ContentModel, CosplayPost, DonghuaEpisode, DonghuaSeries, EpisodeInfo,
+    MangaChapter, MangaSeries, NovelChapter, NovelChapterRef, NovelSeries, PageImage,
+    ScrapeResult,
+};
+use crate::opaque::{Kind, OpaqueCodec, OpaqueError, Source};
+use crate::search::{
+    build_search_url, mangaball_search_endpoint, parse_mangaball_search, parse_nhentai_search,
+    parse_search_html, SearchResultItem, SearchSource,
+};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use moka::future::Cache;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// Shared application state
+// ---------------------------------------------------------------------------
+
+/// Application state shared across all axum handlers.
+#[derive(Clone)]
+pub struct ApiState {
+    pub engine: Arc<ScraperEngine>,
+    pub codec: Arc<OpaqueCodec>,
+    pub cache: Cache<String, Arc<ScrapeResult>>,
+    pub search_cache: Cache<String, Arc<SearchEnvelopeData>>,
+    pub started_at: Instant,
+    pub sysspec: crate::sysspec::SysSpec,
+}
+
+impl ApiState {
+    pub fn new(engine: ScraperEngine, codec: OpaqueCodec, sysspec: crate::sysspec::SysSpec) -> Self {
+        let cache = Cache::builder()
+            .time_to_live(Duration::from_secs(600))
+            .max_capacity(sysspec.scrape_cache_capacity())
+            .build();
+        let search_cache = Cache::builder()
+            .time_to_live(Duration::from_secs(300))
+            .max_capacity(sysspec.search_cache_capacity())
+            .build();
+        Self {
+            engine: Arc::new(engine),
+            codec: Arc::new(codec),
+            cache,
+            search_cache,
+            started_at: Instant::now(),
+            sysspec,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Response envelopes
+// ---------------------------------------------------------------------------
+
+/// Successful response wrapper.
+#[derive(Debug, Serialize)]
+pub struct Envelope<T: Serialize> {
+    pub status: u16,
+    pub ok: bool,
+    pub data: T,
+    pub meta: ResponseMeta,
+}
+
+/// Error response wrapper.
+#[derive(Debug, Serialize)]
+pub struct ErrorEnvelope {
+    pub status: u16,
+    pub ok: bool,
+    pub error: ApiError,
+    pub meta: ResponseMeta,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ApiError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ResponseMeta {
+    pub took_ms: u64,
+    pub cached: bool,
+    pub request_id: String,
+}
+
+/// Build a successful JSON response with the given HTTP status code.
+fn ok<T: Serialize>(
+    status: StatusCode,
+    data: T,
+    started: Instant,
+    cached: bool,
+    req_id: &str,
+) -> Response {
+    let body = Envelope {
+        status: status.as_u16(),
+        ok: true,
+        data,
+        meta: ResponseMeta {
+            took_ms: started.elapsed().as_millis() as u64,
+            cached,
+            request_id: req_id.to_string(),
+        },
+    };
+    (status, Json(body)).into_response()
+}
+
+/// Build an error JSON response.
+fn err(status: StatusCode, code: &str, message: impl Into<String>, started: Instant, req_id: &str) -> Response {
+    let body = ErrorEnvelope {
+        status: status.as_u16(),
+        ok: false,
+        error: ApiError {
+            code: code.to_string(),
+            message: message.into(),
+        },
+        meta: ResponseMeta {
+            took_ms: started.elapsed().as_millis() as u64,
+            cached: false,
+            request_id: req_id.to_string(),
+        },
+    };
+    (status, Json(body)).into_response()
+}
+
+/// Extract the request id from the X-Request-Id header (set by middleware).
+fn req_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Public DTOs (what consumers see)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct MangaSeriesDto {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub artist: Option<String>,
+    pub genres: Vec<String>,
+    pub cover: Option<String>,
+    pub chapter_count: usize,
+    pub chapter_page: u32,
+    pub chapter_page_size: u32,
+    pub chapter_total_pages: u32,
+    pub chapters: Vec<MangaChapterRef>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MangaChapterRef {
+    pub id: String,
+    pub number: f64,
+    pub title: Option<String>,
+    pub translations: Vec<MangaTranslationRef>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MangaTranslationRef {
+    pub id: String,
+    pub language: Option<String>,
+    pub group: Option<String>,
+    pub date: Option<String>,
+    pub pages: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MangaChapterDto {
+    pub id: String,
+    pub series_title: Option<String>,
+    pub chapter_number: f64,
+    pub page_count: usize,
+    pub pages: Vec<MangaPageDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MangaPageDto {
+    pub index: usize,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DonghuaSeriesDto {
+    pub id: String,
+    pub title: String,
+    pub synopsis: Option<String>,
+    pub status: Option<String>,
+    pub genres: Vec<String>,
+    pub cover: Option<String>,
+    pub episode_count: usize,
+    pub episode_page: u32,
+    pub episode_page_size: u32,
+    pub episode_total_pages: u32,
+    pub episodes: Vec<DonghuaEpisodeRef>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DonghuaEpisodeRef {
+    pub id: String,
+    pub number: u32,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DonghuaEpisodeDto {
+    pub id: String,
+    pub series_title: Option<String>,
+    pub series_id: Option<String>,
+    pub episode_number: u32,
+    pub prev_id: Option<String>,
+    pub next_id: Option<String>,
+    pub servers: Vec<DonghuaServer>,
+    pub downloads: Vec<DownloadGroupDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DonghuaServer {
+    pub label: String,
+    pub embed_url: String,
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DownloadGroupDto {
+    pub quality: String,
+    pub mirrors: Vec<DownloadMirrorDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DownloadMirrorDto {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CosplayPostDto {
+    pub id: String,
+    pub title: String,
+    pub cosplayer: Option<String>,
+    pub character: Option<String>,
+    pub series: Option<String>,
+    pub photo_count: Option<u32>,
+    pub video_count: Option<u32>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+    pub author: Option<String>,
+    pub published_at: Option<String>,
+    pub cover: Option<String>,
+    pub images: Vec<String>,
+    pub videos: Vec<String>,
+    pub downloads: Vec<DownloadMirrorDto>,
+    pub unzip_password: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NovelSeriesDto {
+    pub id: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub status: Option<String>,
+    pub genres: Vec<String>,
+    pub synopsis: Option<String>,
+    pub cover: Option<String>,
+    pub rating: Option<String>,
+    pub chapter_count: usize,
+    pub chapter_page: u32,
+    pub chapter_page_size: u32,
+    pub chapter_total_pages: u32,
+    pub chapters: Vec<NovelChapterRefDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NovelChapterRefDto {
+    pub id: String,
+    pub number: u32,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NovelChapterDto {
+    pub id: String,
+    pub series_title: Option<String>,
+    pub series_id: Option<String>,
+    pub chapter_number: u32,
+    pub chapter_title: Option<String>,
+    pub body: String,
+    pub body_html: Option<String>,
+    pub prev_id: Option<String>,
+    pub next_id: Option<String>,
+    pub word_count: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SearchEnvelopeData {
+    pub query: String,
+    pub source: String,
+    pub page: u32,
+    pub total: usize,
+    pub items: Vec<SearchItemDto>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SearchItemDto {
+    pub id: String,
+    pub source: String,
+    pub kind: String,
+    pub title: String,
+    pub thumbnail: Option<String>,
+    pub snippet: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InfoDto {
+    pub name: &'static str,
+    pub version: &'static str,
+    pub description: &'static str,
+    pub uptime_s: u64,
+    pub system: SystemInfoDto,
+    pub providers: Vec<ProviderDto>,
+    pub endpoints: Vec<EndpointDoc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemInfoDto {
+    pub cpu_cores: usize,
+    pub total_mem_mib: u64,
+    pub avail_mem_mib: u64,
+    pub profile: &'static str,
+    pub tokio_threads: usize,
+    pub http_concurrency: usize,
+    pub scrape_cache_capacity: u64,
+    pub search_cache_capacity: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderDto {
+    pub source: &'static str,
+    pub kind: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EndpointDoc {
+    pub method: &'static str,
+    pub path: &'static str,
+    pub description: &'static str,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn resolve_opaque(state: &ApiState, opaque: &str) -> Result<crate::opaque::DecodedOpaque, OpaqueError> {
+    state.codec.decode(opaque)
+}
+
+fn proxy_url(state: &ApiState, raw: &str) -> String {
+    if raw.is_empty() || raw.starts_with("data:") {
+        return String::new();
+    }
+    let payload = URL_SAFE_NO_PAD.encode(raw.as_bytes());
+    let sig = state.codec.sign_image(&payload);
+    format!("/img?p={}&s={}", payload, sig)
+}
+
+fn proxy_opt(state: &ApiState, raw: Option<&str>) -> Option<String> {
+    raw.map(|u| proxy_url(state, u)).filter(|u| !u.is_empty())
+}
+
+/// Get a scrape result via the engine + cache, with single-flight coalescing.
+async fn cached_scrape(state: &ApiState, url: &str) -> Result<(Arc<ScrapeResult>, bool), String> {
+    let key = format!("scrape:{}", url);
+    let already_cached = state.cache.get(&key).await.is_some();
+
+    let url_owned = url.to_string();
+    let engine = state.engine.clone();
+    let arc = state
+        .cache
+        .try_get_with(key, async move {
+            let results = engine
+                .scrape_all(&[url_owned])
+                .await
+                .map_err(|e| e.to_string())?;
+            let r = results.into_iter().next().ok_or_else(|| "no result".to_string())?;
+            if !r.success {
+                return Err(r.error.clone().unwrap_or_else(|| "scrape failed".to_string()));
+            }
+            Ok(Arc::new(r))
+        })
+        .await
+        .map_err(|e: Arc<String>| (*e).clone())?;
+    Ok((arc, already_cached))
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint handlers
+// ---------------------------------------------------------------------------
+
+pub async fn health(req: Request) -> Response {
+    let started = Instant::now();
+    let id = req_id(req.headers());
+    ok(
+        StatusCode::OK,
+        serde_json::json!({"status": "healthy"}),
+        started,
+        false,
+        &id,
+    )
+}
+
+pub async fn info(State(state): State<ApiState>, req: Request) -> Response {
+    let started = Instant::now();
+    let id = req_id(req.headers());
+    let s = state.sysspec;
+
+    let info = InfoDto {
+        name: "apiku",
+        version: env!("CARGO_PKG_VERSION"),
+        description: env!("CARGO_PKG_DESCRIPTION"),
+        uptime_s: state.started_at.elapsed().as_secs(),
+        system: SystemInfoDto {
+            cpu_cores: s.cpu_cores,
+            total_mem_mib: s.total_mem_mib,
+            avail_mem_mib: s.avail_mem_mib,
+            profile: s.profile(),
+            tokio_threads: s.worker_threads(),
+            http_concurrency: s.http_concurrency(),
+            scrape_cache_capacity: s.scrape_cache_capacity(),
+            search_cache_capacity: s.search_cache_capacity(),
+        },
+        providers: vec![
+            ProviderDto {
+                source: "mangaball",
+                kind: "manga",
+                label: "Mangaball - manga, manhwa, manhua (global database)",
+            },
+            ProviderDto {
+                source: "anichin",
+                kind: "donghua",
+                label: "Anichin - donghua streaming with Indonesian subs",
+            },
+            ProviderDto {
+                source: "cosplaytele",
+                kind: "cosplay",
+                label: "Cosplaytele - cosplay photoset archive",
+            },
+            ProviderDto {
+                source: "nhentai",
+                kind: "doujin",
+                label: "nhentai - doujinshi catalogue (multi-mirror)",
+            },
+            ProviderDto {
+                source: "novelid",
+                kind: "novel",
+                label: "NovelID - Indonesian novel translations",
+            },
+        ],
+        endpoints: api_endpoint_docs(),
+    };
+
+    ok(StatusCode::OK, info, started, false, &id)
+}
+
+pub fn api_endpoint_docs() -> Vec<EndpointDoc> {
+    vec![
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/health",
+            description: "Liveness probe",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/info",
+            description: "Server info, system tuning, providers, endpoints",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/search?q={query}&source={all|manga|donghua|cosplay|nhentai|novel}&page={n}",
+            description: "Cross-provider search. nhentai accepts `[tag]` syntax in q.",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/browse/{provider}?feed={feed}&page={n}&size={N}",
+            description: "Provider home / popular / latest feed. Providers: mangaball | anichin | cosplaytele | nhentai | novelid",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/manga/{id}?page={n}&size={N}",
+            description: "Manga series detail (Mangaball). Chapter list paginated (default 60/page, max 300).",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/manga/chapter/{id}",
+            description: "Manga chapter pages",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/donghua/{id}?page={n}&size={N}",
+            description: "Donghua series detail (Anichin). Episode list paginated (default 50/page, max 200).",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/donghua/episode/{id}",
+            description: "Donghua episode + servers + download mirrors",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/cosplay/{id}",
+            description: "Cosplay post (gallery + downloads)",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/novel/{id}?page={n}&size={N}",
+            description: "Novel series detail (NovelID). Handles upstream-paginated chapter lists for novels with thousands of chapters.",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/novel/chapter/{id}",
+            description: "Novel chapter (text body, plus prev/next IDs)",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/nhentai/{id}",
+            description: "nhentai gallery by opaque ID (browser fingerprint spoofed)",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/nhentai/chapter/{id}",
+            description: "nhentai gallery as a chapter (proxied page URLs)",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/img?p={payload}&s={signature}",
+            description: "HMAC-signed image proxy that hides upstream CDNs",
+        },
+    ]
+}
+
+// ---- Search ---------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    #[serde(default = "default_source")]
+    pub source: String,
+    #[serde(default = "default_page")]
+    pub page: u32,
+}
+fn default_source() -> String {
+    "all".to_string()
+}
+fn default_page() -> u32 {
+    1
+}
+
+// ---- Browse (home / popular / latest) ------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct BrowseQuery {
+    /// Feed name. Common values:
+    ///   "home" / ""          - default landing feed
+    ///   "popular"            - popular all-time
+    ///   "popular-today"      - popular today (nhentai)
+    ///   "popular-week"       - popular this week (nhentai)
+    ///   "latest"             - latest updates
+    ///   "recommend"          - recommended (mangaball)
+    /// Any other value is passed through to the provider for genre/category browsing.
+    #[serde(default = "default_feed")]
+    pub feed: String,
+    #[serde(default = "default_page")]
+    pub page: u32,
+    /// Optional page size (capped per provider). Ignored by HTML-paginated providers.
+    #[serde(default)]
+    pub size: Option<u32>,
+}
+fn default_feed() -> String {
+    "home".to_string()
+}
+
+pub async fn search(
+    State(state): State<ApiState>,
+    Query(q): Query<SearchQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let id = req_id(req.headers());
+
+    let qstr = q.q.trim();
+    if qstr.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "missing_query",
+            "Query parameter 'q' is required and must not be empty",
+            started,
+            &id,
+        );
+    }
+    if qstr.len() > 200 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "query_too_long",
+            "Query parameter 'q' exceeds 200 characters",
+            started,
+            &id,
+        );
+    }
+
+    let cache_key = format!("search:{}|{}|{}", qstr, q.source, q.page);
+    let already_cached = state.search_cache.get(&cache_key).await.is_some();
+
+    let state_clone = state.clone();
+    let q_clone = qstr.to_string();
+    let source_clone = q.source.clone();
+    let arc = state
+        .search_cache
+        .try_get_with(cache_key, async move {
+            run_search(&state_clone, &q_clone, &source_clone, q.page)
+                .await
+                .map(Arc::new)
+        })
+        .await;
+
+    match arc {
+        Ok(data) => ok(StatusCode::OK, (*data).clone(), started, already_cached, &id),
+        Err(e) => err(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            (*e).clone(),
+            started,
+            &id,
+        ),
+    }
+}
+
+async fn run_search(
+    state: &ApiState,
+    query: &str,
+    source: &str,
+    page: u32,
+) -> Result<SearchEnvelopeData, String> {
+    let sources: Vec<SearchSource> = match source {
+        "manga" | "mangaball" => vec![SearchSource::Mangaball],
+        "donghua" | "anichin" => vec![SearchSource::Anichin],
+        "cosplay" | "cosplaytele" => vec![SearchSource::Cosplaytele],
+        "nhentai" | "doujin" => vec![SearchSource::Nhentai],
+        "novel" | "novelid" => vec![SearchSource::Novelid],
+        "all" => vec![
+            SearchSource::Mangaball,
+            SearchSource::Anichin,
+            SearchSource::Cosplaytele,
+            SearchSource::Nhentai,
+            SearchSource::Novelid,
+        ],
+        other => return Err(format!("Unknown source '{}'", other)),
+    };
+
+    let futures = sources.into_iter().map(|src| {
+        let q = query.to_string();
+        let state = state.clone();
+        async move {
+            let res = run_single_search(&state, src, &q, page).await;
+            (src, res)
+        }
+    });
+    let results = futures::future::join_all(futures).await;
+
+    let mut items = Vec::new();
+    for (_, r) in results {
+        if let Ok(list) = r {
+            for raw in list {
+                items.push(raw_search_to_dto(state, raw));
+            }
+        }
+    }
+
+    Ok(SearchEnvelopeData {
+        query: query.to_string(),
+        source: source.to_string(),
+        page,
+        total: items.len(),
+        items,
+    })
+}
+
+async fn run_single_search(
+    state: &ApiState,
+    source: SearchSource,
+    query: &str,
+    page: u32,
+) -> Result<Vec<SearchResultItem>, String> {
+    if matches!(source, SearchSource::Mangaball) {
+        return search_mangaball(state, query).await;
+    }
+    if matches!(source, SearchSource::Nhentai) {
+        return search_nhentai_sorted(state, query, page, "").await;
+    }
+    let url = match build_search_url(source, query, page) {
+        Some(u) => u,
+        None => return Err(format!("no search URL for source {:?}", source)),
+    };
+    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    Ok(parse_search_html(source, &url, &html))
+}
+
+/// Hit the nhentai JSON search API directly. We construct browser-like
+/// headers via the fingerprint module so the request looks like a real
+/// nhentai.net visit.
+#[allow(dead_code)]
+async fn search_nhentai(state: &ApiState, query: &str, page: u32) -> Result<Vec<SearchResultItem>, String> {
+    search_nhentai_sorted(state, query, page, "").await
+}
+
+async fn search_nhentai_sorted(
+    state: &ApiState,
+    query: &str,
+    page: u32,
+    sort: &str,
+) -> Result<Vec<SearchResultItem>, String> {
+    let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_search_sorted(query, page.max(1), sort);
+    let body = call_nhentai_search_api(state, &url).await?;
+    Ok(parse_nhentai_search(&body))
+}
+
+async fn call_nhentai_search_api(state: &ApiState, url: &str) -> Result<serde_json::Value, String> {
+    let fp = BrowserFingerprint::for_url(url);
+    let mut adapter_headers = fp.as_header_map();
+    adapter_headers.insert("Referer".to_string(), "https://nhentai.net/".to_string());
+    adapter_headers.insert(
+        "Accept".to_string(),
+        "application/json, text/plain, */*".to_string(),
+    );
+    adapter_headers.insert("Sec-Fetch-Dest".to_string(), "empty".to_string());
+    adapter_headers.insert("Sec-Fetch-Mode".to_string(), "cors".to_string());
+    adapter_headers.insert("Sec-Fetch-Site".to_string(), "same-origin".to_string());
+    adapter_headers.remove("Upgrade-Insecure-Requests");
+
+    let pipeline = state.engine.pipeline();
+    let headers = pipeline
+        .build_headers(url, None, Some(&adapter_headers))
+        .map_err(|e| e.to_string())?;
+
+    let resp = state
+        .engine
+        .client()
+        .get(url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        tracing::warn!(url = %url, status = status.as_u16(), "nhentai upstream non-2xx");
+        return Ok(serde_json::Value::Null);
+    }
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let body: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(err = %e, snippet = %&text.chars().take(200).collect::<String>(), "nhentai body not JSON");
+            return Ok(serde_json::Value::Null);
+        }
+    };
+    Ok(body)
+}
+
+async fn search_mangaball(state: &ApiState, query: &str) -> Result<Vec<SearchResultItem>, String> {
+    let home_url = "https://mangaball.net/";
+    let home_html = state.engine.fetch_html(home_url).await.map_err(|e| e.to_string())?;
+    let csrf = match regex::Regex::new(r#"<meta\s+name="csrf-token"\s+content="([^"]+)""#)
+        .ok()
+        .and_then(|re| re.captures(&home_html).map(|c| c[1].to_string()))
+    {
+        Some(c) => c,
+        None => return Ok(Vec::new()),
+    };
+    let mut adapter_headers = std::collections::HashMap::new();
+    adapter_headers.insert("X-CSRF-TOKEN".to_string(), csrf);
+    adapter_headers.insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
+    adapter_headers.insert(
+        "Accept".to_string(),
+        "application/json, text/javascript, */*; q=0.01".to_string(),
+    );
+    adapter_headers.insert("Referer".to_string(), home_url.to_string());
+
+    let pipeline = state.engine.pipeline();
+    let api_url = mangaball_search_endpoint();
+    let headers = pipeline
+        .build_headers(api_url, None, Some(&adapter_headers))
+        .map_err(|e| e.to_string())?;
+
+    let form = [("search_input", query)];
+    let resp = state
+        .engine
+        .client()
+        .post(api_url)
+        .headers(headers)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(parse_mangaball_search(&body))
+}
+
+fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
+    let (source, kind_for_ux) = match raw.source.as_str() {
+        "mangaball" => (Source::Mangaball, "manga"),
+        "anichin" => (Source::Anichin, "donghua"),
+        "cosplaytele" => (Source::Cosplaytele, "cosplay"),
+        "nhentai" => (Source::Nhentai, "doujin"),
+        "novelid" => (Source::Novelid, "novel"),
+        _ => (Source::Mangaball, "unknown"),
+    };
+    let opaque_kind = match source {
+        Source::Mangaball | Source::Anichin | Source::Nhentai | Source::Novelid => Kind::Series,
+        Source::Cosplaytele => Kind::Post,
+    };
+    let id = state.codec.encode(source, opaque_kind, &raw.url);
+    SearchItemDto {
+        id,
+        source: raw.source,
+        kind: kind_for_ux.to_string(),
+        title: raw.title,
+        thumbnail: proxy_opt(state, raw.thumbnail.as_deref()),
+        snippet: raw.snippet,
+        tags: raw.tags,
+    }
+}
+
+// ---- Browse (home / popular / latest) ------------------------------------
+
+/// Generic browse handler: `GET /api/v1/{provider}/browse?feed=<feed>&page=<n>`.
+/// Each provider maps `feed` to a different upstream URL.
+pub async fn browse(
+    State(state): State<ApiState>,
+    Path(provider): Path<String>,
+    Query(q): Query<BrowseQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    let p = q.page.max(1);
+    let cache_key = format!("browse:{}|{}|{}|{}", provider, q.feed, p, q.size.unwrap_or(0));
+    let cached = state.search_cache.get(&cache_key).await.is_some();
+
+    let provider_lc = provider.to_lowercase();
+    let feed = q.feed.clone();
+    let size = q.size;
+    let state_clone = state.clone();
+
+    let arc = state
+        .search_cache
+        .try_get_with(cache_key, async move {
+            let items = run_browse(&state_clone, &provider_lc, &feed, p, size).await?;
+            Ok::<Arc<SearchEnvelopeData>, String>(Arc::new(SearchEnvelopeData {
+                query: String::new(),
+                source: provider_lc,
+                page: p,
+                total: items.len(),
+                items,
+            }))
+        })
+        .await;
+
+    match arc {
+        Ok(data) => ok(StatusCode::OK, (*data).clone(), started, cached, &rid),
+        Err(e) => err(StatusCode::BAD_GATEWAY, "upstream_error", (*e).clone(), started, &rid),
+    }
+}
+
+async fn run_browse(
+    state: &ApiState,
+    provider: &str,
+    feed: &str,
+    page: u32,
+    size: Option<u32>,
+) -> Result<Vec<SearchItemDto>, String> {
+    match provider {
+        "mangaball" | "manga" => browse_mangaball(state, feed, page, size).await,
+        "anichin" | "donghua" => browse_anichin(state, feed, page).await,
+        "cosplaytele" | "cosplay" => browse_cosplaytele(state, feed, page).await,
+        "nhentai" | "doujin" => browse_nhentai(state, feed, page).await,
+        "novelid" | "novel" => browse_novelid(state, feed, page).await,
+        _ => Err(format!("unknown provider '{}'", provider)),
+    }
+}
+
+async fn browse_anichin(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+    let url = crate::adapters::anichin::AnichinAdapter::browse_url(feed, page);
+    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    let raw = parse_search_html(SearchSource::Anichin, &url, &html);
+    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+}
+
+async fn browse_cosplaytele(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+    let url = crate::adapters::cosplaytele::CosplayteleAdapter::browse_url(feed, page);
+    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    let raw = parse_search_html(SearchSource::Cosplaytele, &url, &html);
+    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+}
+
+async fn browse_nhentai(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+    let sort = crate::adapters::nhentai::NhentaiAdapter::feed_to_sort(feed);
+    let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_popular(page, sort);
+    let body = call_nhentai_search_api(state, &url).await?;
+    let raw = parse_nhentai_search(&body);
+    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+}
+
+async fn browse_novelid(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+    let url = crate::adapters::novelid::NovelidAdapter::browse_url(feed, page);
+    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    let raw = crate::search::parse_novelid_search(&url, &html);
+    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+}
+
+/// Mangaball browse: POSTs to `/api/v1/title/search/` with a `search_type`
+/// derived from the feed name. The response JSON shape mirrors smart-search.
+async fn browse_mangaball(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+    size: Option<u32>,
+) -> Result<Vec<SearchItemDto>, String> {
+    let stype = crate::adapters::mangaball::MangaballAdapter::browse_search_type(feed);
+    let limit = (size.unwrap_or(30).min(60).max(5) as usize) * (page.max(1) as usize);
+
+    let home_url = "https://mangaball.net/";
+    let home_html = state.engine.fetch_html(home_url).await.map_err(|e| e.to_string())?;
+    let csrf = match regex::Regex::new(r#"<meta\s+name="csrf-token"\s+content="([^"]+)""#)
+        .ok()
+        .and_then(|re| re.captures(&home_html).map(|c| c[1].to_string()))
+    {
+        Some(c) => c,
+        None => return Ok(Vec::new()),
+    };
+    let mut adapter_headers = std::collections::HashMap::new();
+    adapter_headers.insert("X-CSRF-TOKEN".to_string(), csrf);
+    adapter_headers.insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
+    adapter_headers.insert(
+        "Accept".to_string(),
+        "application/json, text/javascript, */*; q=0.01".to_string(),
+    );
+    adapter_headers.insert("Referer".to_string(), home_url.to_string());
+
+    let pipeline = state.engine.pipeline();
+    let api_url = crate::adapters::mangaball::MangaballAdapter::browse_endpoint();
+    let headers = pipeline
+        .build_headers(api_url, None, Some(&adapter_headers))
+        .map_err(|e| e.to_string())?;
+
+    let limit_str = limit.to_string();
+    let form = [
+        ("search_type", stype),
+        ("search_limit", &limit_str),
+    ];
+    let resp = state
+        .engine
+        .client()
+        .post(api_url)
+        .headers(headers)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    // Mangaball's response is `{ code: 200, data: { manga: [...] } }`. We
+    // also see shapes where `data` is a flat array. Reuse the existing
+    // search parser to handle both, then slice the page window.
+    let raw = crate::search::parse_mangaball_search(&body);
+    // Crude pagination: take items [(page-1)*size .. page*size]
+    let s = size.unwrap_or(30).min(60).max(5) as usize;
+    let start = ((page.max(1) - 1) as usize) * s;
+    let end = (start + s).min(raw.len());
+    let slice = if start >= raw.len() {
+        &[]
+    } else {
+        &raw[start..end]
+    };
+    Ok(slice.iter().cloned().map(|r| raw_search_to_dto(state, r)).collect())
+}
+
+// ---- Manga ----------------------------------------------------------------
+
+pub async fn manga_series(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(pq): Query<ChapterPageQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Mangaball {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not mangaball",
+            started,
+            &rid,
+        );
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let series = match &result.content {
+        Some(ContentModel::MangaSeries(s)) => s,
+        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a manga series", started, &rid),
+    };
+    let dto = manga_series_to_dto(&state, series, &id, pq.page, pq.size);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn manga_series_to_dto(
+    state: &ApiState,
+    s: &MangaSeries,
+    id: &str,
+    page: u32,
+    size: Option<u32>,
+) -> MangaSeriesDto {
+    let total = s.chapters.len();
+    let size = size.unwrap_or(60).clamp(1, 300) as usize;
+    let p = page.max(1) as usize;
+    let start = (p - 1) * size;
+    let end = (start + size).min(total);
+    let window: Vec<&ChapterInfo> = if start >= total {
+        Vec::new()
+    } else {
+        s.chapters[start..end].iter().collect()
+    };
+    let chapters = window
+        .iter()
+        .map(|c| chapter_ref_to_dto(state, c))
+        .collect::<Vec<_>>();
+    let total_pages = if total == 0 { 1 } else { total.div_ceil(size) };
+    MangaSeriesDto {
+        id: id.to_string(),
+        title: s.title.clone().unwrap_or_default(),
+        description: s.synopsis.clone(),
+        author: s.author.clone(),
+        artist: s.artist.clone(),
+        genres: s.genres.clone(),
+        cover: proxy_opt(state, s.cover_image.as_deref()),
+        chapter_count: total,
+        chapter_page: p as u32,
+        chapter_page_size: size as u32,
+        chapter_total_pages: total_pages as u32,
+        chapters,
+    }
+}
+
+fn chapter_ref_to_dto(state: &ApiState, c: &ChapterInfo) -> MangaChapterRef {
+    MangaChapterRef {
+        id: state.codec.encode(Source::Mangaball, Kind::Item, &c.url),
+        number: c.number,
+        title: c.title.clone(),
+        translations: c
+            .translations
+            .iter()
+            .map(|t| MangaTranslationRef {
+                id: state.codec.encode(Source::Mangaball, Kind::Item, &t.url),
+                language: t.language.clone(),
+                group: t.group.clone(),
+                date: t.date.clone(),
+                pages: t.pages,
+            })
+            .collect(),
+    }
+}
+
+pub async fn manga_chapter(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Mangaball {
+        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not mangaball", started, &rid);
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let chap = match &result.content {
+        Some(ContentModel::MangaChapter(c)) => c,
+        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a manga chapter", started, &rid),
+    };
+    let dto = manga_chapter_to_dto(&state, chap, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn manga_chapter_to_dto(state: &ApiState, c: &MangaChapter, id: &str) -> MangaChapterDto {
+    MangaChapterDto {
+        id: id.to_string(),
+        series_title: c.series_title.clone(),
+        chapter_number: c.chapter_number,
+        page_count: c.pages.len(),
+        pages: c.pages.iter().map(|p| page_to_dto(state, p)).collect(),
+    }
+}
+
+fn page_to_dto(state: &ApiState, p: &PageImage) -> MangaPageDto {
+    MangaPageDto {
+        index: p.index,
+        url: proxy_url(state, &p.url),
+    }
+}
+
+// ---- Donghua --------------------------------------------------------------
+
+pub async fn donghua_series(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(pq): Query<ChapterPageQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Anichin {
+        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not anichin", started, &rid);
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let series = match &result.content {
+        Some(ContentModel::DonghuaSeries(s)) => s,
+        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a donghua series", started, &rid),
+    };
+    let dto = donghua_series_to_dto(&state, series, &id, pq.page, pq.size);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn donghua_series_to_dto(
+    state: &ApiState,
+    s: &DonghuaSeries,
+    id: &str,
+    page: u32,
+    size: Option<u32>,
+) -> DonghuaSeriesDto {
+    let total = s.episodes.len();
+    let size = size.unwrap_or(50).clamp(1, 200) as usize;
+    let p = page.max(1) as usize;
+    let start = (p - 1) * size;
+    let end = (start + size).min(total);
+    let window: Vec<&EpisodeInfo> = if start >= total {
+        Vec::new()
+    } else {
+        s.episodes[start..end].iter().collect()
+    };
+    let total_pages = if total == 0 { 1 } else { total.div_ceil(size) };
+    DonghuaSeriesDto {
+        id: id.to_string(),
+        title: s.title.clone().unwrap_or_default(),
+        synopsis: s.synopsis.clone(),
+        status: s.status.clone(),
+        genres: s.genres.clone(),
+        cover: proxy_opt(state, s.thumbnail.as_deref()),
+        episode_count: total,
+        episode_page: p as u32,
+        episode_page_size: size as u32,
+        episode_total_pages: total_pages as u32,
+        episodes: window.iter().map(|e| episode_ref_to_dto(state, e)).collect(),
+    }
+}
+
+fn episode_ref_to_dto(state: &ApiState, e: &EpisodeInfo) -> DonghuaEpisodeRef {
+    DonghuaEpisodeRef {
+        id: state.codec.encode(Source::Anichin, Kind::Item, &e.url),
+        number: e.number,
+        title: e.title.clone(),
+    }
+}
+
+pub async fn donghua_episode(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Anichin {
+        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not anichin", started, &rid);
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let ep = match &result.content {
+        Some(ContentModel::DonghuaEpisode(e)) => e,
+        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a donghua episode", started, &rid),
+    };
+    let dto = donghua_episode_to_dto(&state, ep, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn donghua_episode_to_dto(state: &ApiState, e: &DonghuaEpisode, id: &str) -> DonghuaEpisodeDto {
+    DonghuaEpisodeDto {
+        id: id.to_string(),
+        series_title: e.series_title.clone(),
+        series_id: e
+            .series_url
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Anichin, Kind::Series, u)),
+        episode_number: e.episode_number,
+        prev_id: e
+            .prev_episode
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Anichin, Kind::Item, u)),
+        next_id: e
+            .next_episode
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Anichin, Kind::Item, u)),
+        servers: e
+            .sources
+            .iter()
+            .map(|s| DonghuaServer {
+                label: s.quality.clone().unwrap_or_else(|| "Server".to_string()),
+                embed_url: s.url.clone(),
+                format: s.format.clone(),
+            })
+            .collect(),
+        downloads: e
+            .downloads
+            .iter()
+            .map(|g| DownloadGroupDto {
+                quality: g.quality.clone(),
+                mirrors: g
+                    .mirrors
+                    .iter()
+                    .map(|m| DownloadMirrorDto {
+                        name: m.name.clone(),
+                        url: m.url.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+// ---- Cosplay --------------------------------------------------------------
+
+pub async fn cosplay_post(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Cosplaytele {
+        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not cosplaytele", started, &rid);
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let cp = match &result.content {
+        Some(ContentModel::CosplayPost(c)) => c,
+        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a cosplay post", started, &rid),
+    };
+    let dto = cosplay_to_dto(&state, cp, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn cosplay_to_dto(state: &ApiState, c: &CosplayPost, id: &str) -> CosplayPostDto {
+    CosplayPostDto {
+        id: id.to_string(),
+        title: c.title.clone().unwrap_or_default(),
+        cosplayer: c.cosplayer.clone(),
+        character: c.character.clone(),
+        series: c.series.clone(),
+        photo_count: c.photo_count,
+        video_count: c.video_count,
+        categories: c.categories.clone(),
+        tags: c.tags.clone(),
+        author: c.author.clone(),
+        published_at: c.published_at.clone(),
+        cover: proxy_opt(state, c.cover_image.as_deref()),
+        images: c.images.iter().map(|u| proxy_url(state, u)).collect(),
+        videos: c.videos.iter().map(|u| proxy_url(state, u)).collect(),
+        downloads: c
+            .download_links
+            .iter()
+            .map(|m| DownloadMirrorDto {
+                name: m.name.clone(),
+                url: m.url.clone(),
+            })
+            .collect(),
+        unzip_password: c.unzip_password.clone(),
+    }
+}
+
+// ---- Novel (novelid.org) -------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ChapterPageQuery {
+    /// Chapter page (1-indexed). Each page returns `size` chapters.
+    #[serde(default = "default_page")]
+    pub page: u32,
+    /// Chapters per page (default 50, max 200).
+    #[serde(default)]
+    pub size: Option<u32>,
+}
+
+pub async fn novel_series(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(pq): Query<ChapterPageQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Novelid {
+        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not novelid", started, &rid);
+    }
+
+    // Always scrape page 1 to get the metadata + first 30 chapters.
+    let (result, mut cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let series_p1 = match &result.content {
+        Some(ContentModel::NovelSeries(s)) => s.clone(),
+        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a novel series", started, &rid),
+    };
+
+    // Default per-API-page size
+    let api_size = pq.size.unwrap_or(30).clamp(1, 200);
+    let api_page = pq.page.max(1);
+
+    // If upstream is not paginated, just slice the in-memory list.
+    if !series_p1.chapters_paginated_upstream {
+        let dto = novel_series_to_dto(&state, &series_p1, &id, api_page, Some(api_size));
+        return ok(StatusCode::OK, dto, started, cached, &rid);
+    }
+
+    // Upstream IS paginated. Compute which upstream pages we need to fetch.
+    let upstream_per_page = series_p1
+        .upstream_chapters_per_page
+        .unwrap_or(30)
+        .max(1);
+    let upstream_total = series_p1.upstream_total_pages.unwrap_or(1).max(1);
+
+    // Window in absolute chapter indices (0-based)
+    let start_idx: u32 = (api_page - 1) * api_size;
+    let end_idx: u32 = start_idx + api_size; // exclusive
+
+    // Map to upstream page numbers (1-based)
+    let first_upstream = (start_idx / upstream_per_page) + 1;
+    let last_upstream_inclusive = ((end_idx - 1) / upstream_per_page) + 1;
+    let last_upstream = last_upstream_inclusive.min(upstream_total);
+
+    // Edge case: requested window is past the end
+    if first_upstream > upstream_total {
+        // Compute an estimate of total chapter count using upstream_total
+        // and the current page1 count (if upstream_total == 1, total = chapters.len()).
+        let est_total = estimated_total(&series_p1);
+        let dto = build_novel_dto_with_pagination(
+            &state,
+            &series_p1,
+            &id,
+            api_page,
+            api_size,
+            Vec::new(),
+            est_total,
+        );
+        return ok(StatusCode::OK, dto, started, cached, &rid);
+    }
+
+    // Fetch the additional upstream pages we don't already have
+    // (page 1's chapters live in `series_p1.chapters`).
+    let mut upstream_pages_to_fetch: Vec<u32> =
+        (first_upstream..=last_upstream).filter(|p| *p != 1).collect();
+
+    // Always fetch the last upstream page when we need an accurate total
+    // (cheap: it's cached after the first time anyone hits the novel).
+    let want_accurate_total =
+        upstream_total > 1 && !upstream_pages_to_fetch.contains(&upstream_total);
+    if want_accurate_total {
+        upstream_pages_to_fetch.push(upstream_total);
+    }
+
+    let canonical = dec.url.clone();
+    let fetched = fetch_upstream_chapter_pages(&state, &canonical, &upstream_pages_to_fetch).await;
+
+    // Did everything come from cache?
+    if cached && fetched.iter().any(|(_, _, was_cached)| !*was_cached) {
+        cached = false;
+    }
+
+    // Build a flat sorted chapter list combining page 1's chapters with the
+    // fetched upstream pages.
+    let mut all_chapters: Vec<NovelChapterRef> = series_p1.chapters.clone();
+    let mut last_page_count: Option<u32> = None;
+    for (p, s, _) in fetched {
+        if let Some(s) = s {
+            // If this is the last upstream page, remember its chapter count
+            // so we can compute the accurate total.
+            if p == upstream_total {
+                last_page_count = Some(s.chapters.len() as u32);
+            }
+            all_chapters.extend(s.chapters);
+        }
+    }
+    // Dedup by number, sort
+    all_chapters.sort_by_key(|c| c.number);
+    all_chapters.dedup_by_key(|c| c.number);
+
+    // Compute true total when available
+    let est_total: usize = if let Some(last_count) = last_page_count {
+        ((upstream_total.saturating_sub(1)) * upstream_per_page + last_count) as usize
+    } else if upstream_total <= 1 {
+        all_chapters.len()
+    } else {
+        // No accurate count yet — estimate as upstream_total * per_page
+        // minus an over-estimate (we trim the page-1 set to accuracy when
+        // we've actually fetched it).
+        (upstream_total * upstream_per_page) as usize
+    };
+
+    // Slice the requested window by *chapter number* (rather than vec
+    // index). novelid numbers chapters contiguously 1..total, but we may
+    // have fetched the last page in addition to the requested page so the
+    // accumulated list has gaps. We pick chapters whose `number` falls in
+    // the inclusive range [start_idx + 1 .. end_idx].
+    let start_num = start_idx + 1;
+    let end_num = end_idx; // inclusive, end_idx = start_idx + api_size
+    let window: Vec<NovelChapterRef> = all_chapters
+        .into_iter()
+        .filter(|c| c.number >= start_num && c.number <= end_num)
+        .collect();
+
+    let dto = build_novel_dto_with_pagination(
+        &state,
+        &series_p1,
+        &id,
+        api_page,
+        api_size,
+        window,
+        est_total,
+    );
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+/// Estimate total chapter count when only page-1 data is known.
+fn estimated_total(s: &NovelSeries) -> usize {
+    if !s.chapters_paginated_upstream {
+        return s.chapters.len();
+    }
+    let per_page = s.upstream_chapters_per_page.unwrap_or(30) as usize;
+    let total_pages = s.upstream_total_pages.unwrap_or(1) as usize;
+    (per_page * total_pages).max(s.chapters.len())
+}
+
+/// Fetch a list of upstream chapter-list pages for a given canonical novel URL.
+/// Returns a Vec of `(upstream_page_number, parsed page, was_cached)` entries.
+async fn fetch_upstream_chapter_pages(
+    state: &ApiState,
+    canonical: &str,
+    pages: &[u32],
+) -> Vec<(u32, Option<NovelSeries>, bool)> {
+    use futures::future::join_all;
+
+    let futures = pages.iter().copied().map(|p| {
+        let url = crate::adapters::novelid::NovelidAdapter::detail_url_for_page(canonical, p);
+        let state = state.clone();
+        async move {
+            match cached_scrape(&state, &url).await {
+                Ok((arc, cached)) => match &arc.content {
+                    Some(ContentModel::NovelSeries(s)) => (p, Some(s.clone()), cached),
+                    _ => (p, None, cached),
+                },
+                Err(_) => (p, None, false),
+            }
+        }
+    });
+    join_all(futures).await
+}
+
+fn build_novel_dto_with_pagination(
+    state: &ApiState,
+    s: &NovelSeries,
+    id: &str,
+    api_page: u32,
+    api_size: u32,
+    window: Vec<NovelChapterRef>,
+    total: usize,
+) -> NovelSeriesDto {
+    let chapters = window
+        .iter()
+        .map(|c| novel_chapter_ref_to_dto(state, c))
+        .collect::<Vec<_>>();
+    let size = (api_size.max(1)) as usize;
+    let total_pages = if total == 0 { 1 } else { total.div_ceil(size) };
+    NovelSeriesDto {
+        id: id.to_string(),
+        title: s.title.clone().unwrap_or_default(),
+        author: s.author.clone(),
+        status: s.status.clone(),
+        genres: s.genres.clone(),
+        synopsis: s.synopsis.clone(),
+        cover: proxy_opt(state, s.cover_image.as_deref()),
+        rating: s.rating.clone(),
+        chapter_count: total,
+        chapter_page: api_page,
+        chapter_page_size: api_size,
+        chapter_total_pages: total_pages as u32,
+        chapters,
+    }
+}
+
+fn novel_series_to_dto(
+    state: &ApiState,
+    s: &NovelSeries,
+    id: &str,
+    page: u32,
+    size: Option<u32>,
+) -> NovelSeriesDto {
+    let total = s.chapters.len();
+    let size = size.unwrap_or(50).clamp(1, 200) as usize;
+    let p = page.max(1) as usize;
+    let start = (p - 1) * size;
+    let end = (start + size).min(total);
+    let window: Vec<&NovelChapterRef> = if start >= total {
+        Vec::new()
+    } else {
+        s.chapters[start..end].iter().collect()
+    };
+    let chapters = window
+        .iter()
+        .map(|c| novel_chapter_ref_to_dto(state, c))
+        .collect::<Vec<_>>();
+    let total_pages = if total == 0 { 1 } else { total.div_ceil(size) };
+    NovelSeriesDto {
+        id: id.to_string(),
+        title: s.title.clone().unwrap_or_default(),
+        author: s.author.clone(),
+        status: s.status.clone(),
+        genres: s.genres.clone(),
+        synopsis: s.synopsis.clone(),
+        cover: proxy_opt(state, s.cover_image.as_deref()),
+        rating: s.rating.clone(),
+        chapter_count: total,
+        chapter_page: p as u32,
+        chapter_page_size: size as u32,
+        chapter_total_pages: total_pages as u32,
+        chapters,
+    }
+}
+
+fn novel_chapter_ref_to_dto(state: &ApiState, c: &NovelChapterRef) -> NovelChapterRefDto {
+    NovelChapterRefDto {
+        id: state.codec.encode(Source::Novelid, Kind::Item, &c.url),
+        number: c.number,
+        title: c.title.clone(),
+    }
+}
+
+pub async fn novel_chapter(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Novelid {
+        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not novelid", started, &rid);
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let chap = match &result.content {
+        Some(ContentModel::NovelChapter(c)) => c,
+        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a novel chapter", started, &rid),
+    };
+    let dto = novel_chapter_to_dto(&state, chap, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn novel_chapter_to_dto(state: &ApiState, c: &NovelChapter, id: &str) -> NovelChapterDto {
+    let word_count = c.body.split_whitespace().count();
+    NovelChapterDto {
+        id: id.to_string(),
+        series_title: c.series_title.clone(),
+        series_id: c
+            .series_url
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Novelid, Kind::Series, u)),
+        chapter_number: c.chapter_number,
+        chapter_title: c.chapter_title.clone(),
+        body: c.body.clone(),
+        body_html: c.body_html.clone(),
+        prev_id: c
+            .prev_url
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Novelid, Kind::Item, u)),
+        next_id: c
+            .next_url
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Novelid, Kind::Item, u)),
+        word_count,
+    }
+}
+
+// ---- nhentai --------------------------------------------------------------
+
+/// nhentai gallery as a series (cover + chapter list with one entry).
+pub async fn nhentai_gallery(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Nhentai {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not nhentai",
+            started,
+            &rid,
+        );
+    }
+    // Always go through the JSON API URL — even if the opaque carries the
+    // browser-facing /g/<id>/ URL, normalise to the API endpoint.
+    let api_url = match crate::adapters::nhentai::NhentaiAdapter::gallery_id_from_url(&dec.url) {
+        Some(gid) => crate::adapters::nhentai::NhentaiAdapter::api_url_for_gallery(gid),
+        None => dec.url.clone(),
+    };
+
+    let (json, cached) = match fetch_nhentai_json(&state, &api_url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let series = match crate::adapters::nhentai::NhentaiAdapter::parse_gallery_json(&dec.url, &json) {
+        Some(s) => s,
+        None => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield an nhentai gallery",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = manga_series_to_dto_for_source(&state, &series, &id, Source::Nhentai);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+/// nhentai gallery as a chapter (direct page list).
+pub async fn nhentai_chapter(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+    };
+    if dec.source != Source::Nhentai {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not nhentai",
+            started,
+            &rid,
+        );
+    }
+    let api_url = match crate::adapters::nhentai::NhentaiAdapter::gallery_id_from_url(&dec.url) {
+        Some(gid) => crate::adapters::nhentai::NhentaiAdapter::api_url_for_gallery(gid),
+        None => dec.url.clone(),
+    };
+    let (json, cached) = match fetch_nhentai_json(&state, &api_url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let chap = match crate::adapters::nhentai::NhentaiAdapter::parse_gallery_as_chapter(&dec.url, &json) {
+        Some(c) => c,
+        None => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield nhentai pages",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = manga_chapter_to_dto(&state, &chap, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+/// Fetch the nhentai JSON API with browser-fingerprint headers and a small
+/// in-memory single-flight cache.
+async fn fetch_nhentai_json(state: &ApiState, api_url: &str) -> Result<(serde_json::Value, bool), String> {
+    let key = format!("nhentai_json:{}", api_url);
+    let cached = state.cache.get(&key).await.is_some();
+
+    let url_owned = api_url.to_string();
+    let state_clone = state.clone();
+    let result = state
+        .cache
+        .try_get_with(key, async move {
+            let json = call_nhentai_api(&state_clone, &url_owned).await.map_err(|e| e)?;
+            // Wrap the JSON in a fake ScrapeResult so we can reuse the
+            // existing scrape_cache type. We stash the JSON inside a
+            // ContentModel::JsonApi.
+            Ok::<Arc<ScrapeResult>, String>(Arc::new(ScrapeResult {
+                url: url_owned.clone(),
+                success: true,
+                adapter_used: Some("nhentai".to_string()),
+                content: Some(ContentModel::JsonApi(crate::models::JsonApiResponse {
+                    url: url_owned.clone(),
+                    status_code: 200,
+                    content_type: Some("application/json".to_string()),
+                    data: json,
+                })),
+                deep: None,
+                error: None,
+                elapsed_ms: 0,
+            }))
+        })
+        .await
+        .map_err(|e: Arc<String>| (*e).clone())?;
+
+    let json = match &result.content {
+        Some(ContentModel::JsonApi(j)) => j.data.clone(),
+        _ => return Err("unexpected cached content".to_string()),
+    };
+    Ok((json, cached))
+}
+
+async fn call_nhentai_api(state: &ApiState, api_url: &str) -> Result<serde_json::Value, String> {
+    let fp = BrowserFingerprint::for_url(api_url);
+    let mut adapter_headers = fp.as_header_map();
+    adapter_headers.insert("Referer".to_string(), "https://nhentai.net/".to_string());
+    adapter_headers.insert(
+        "Accept".to_string(),
+        "application/json, text/plain, */*".to_string(),
+    );
+    adapter_headers.insert("Sec-Fetch-Dest".to_string(), "empty".to_string());
+    adapter_headers.insert("Sec-Fetch-Mode".to_string(), "cors".to_string());
+    adapter_headers.insert("Sec-Fetch-Site".to_string(), "same-origin".to_string());
+    adapter_headers.remove("Upgrade-Insecure-Requests");
+
+    let pipeline = state.engine.pipeline();
+    let headers = pipeline
+        .build_headers(api_url, None, Some(&adapter_headers))
+        .map_err(|e| e.to_string())?;
+
+    let resp = state
+        .engine
+        .client()
+        .get(api_url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("upstream returned {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(body)
+}
+
+/// Like `manga_series_to_dto`, but emits opaque IDs for the given source so
+/// that nhentai chapter IDs encode `Source::Nhentai`.
+fn manga_series_to_dto_for_source(
+    state: &ApiState,
+    s: &MangaSeries,
+    id: &str,
+    source: Source,
+) -> MangaSeriesDto {
+    let chapters = s
+        .chapters
+        .iter()
+        .map(|c| MangaChapterRef {
+            id: state.codec.encode(source, Kind::Item, &c.url),
+            number: c.number,
+            title: c.title.clone(),
+            translations: c
+                .translations
+                .iter()
+                .map(|t| MangaTranslationRef {
+                    id: state.codec.encode(source, Kind::Item, &t.url),
+                    language: t.language.clone(),
+                    group: t.group.clone(),
+                    date: t.date.clone(),
+                    pages: t.pages,
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let total = chapters.len();
+    MangaSeriesDto {
+        id: id.to_string(),
+        title: s.title.clone().unwrap_or_default(),
+        description: s.synopsis.clone(),
+        author: s.author.clone(),
+        artist: s.artist.clone(),
+        genres: s.genres.clone(),
+        cover: proxy_opt(state, s.cover_image.as_deref()),
+        chapter_count: total,
+        chapter_page: 1,
+        chapter_page_size: total as u32,
+        chapter_total_pages: 1,
+        chapters,
+    }
+}
+
+// ---- Image proxy ----------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ImgQuery {
+    pub p: String,
+    pub s: String,
+}
+
+pub async fn img_proxy(
+    State(state): State<ApiState>,
+    Query(q): Query<ImgQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    if !state.codec.verify_image(&q.p, &q.s) {
+        return err(StatusCode::FORBIDDEN, "bad_signature", "Image proxy signature is invalid", started, &rid);
+    }
+
+    let url_bytes = match URL_SAFE_NO_PAD.decode(q.p.as_bytes()) {
+        Ok(b) => b,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "bad_payload", "Image proxy payload is not valid base64url", started, &rid),
+    };
+    let url = match String::from_utf8(url_bytes) {
+        Ok(u) => u,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "bad_payload", "Image proxy payload is not valid utf-8", started, &rid),
+    };
+
+    // Allowlist: only fetch from known upstream hosts.
+    if !is_allowed_image_host(&url) {
+        return err(StatusCode::FORBIDDEN, "host_not_allowed", "Image proxy will not fetch this host", started, &rid);
+    }
+
+    let domain = match url::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)) {
+        Some(d) => d,
+        None => return err(StatusCode::BAD_REQUEST, "bad_url", "Could not parse image URL", started, &rid),
+    };
+    let pipeline = state.engine.pipeline();
+
+    // Apply a coherent browser fingerprint and tailor it for an image
+    // request. The Referer is set to the source domain so origin checks
+    // pass (nhentai/cosplaytele block hotlinking otherwise).
+    let fp = BrowserFingerprint::for_url(&url);
+    let mut fp_headers = fp.as_image_headers();
+    let referer = referer_for_host(&domain);
+    fp_headers.insert("Referer".to_string(), referer.clone());
+
+    let mut headers = match pipeline.build_headers(&url, None, Some(&fp_headers)) {
+        Ok(h) => h,
+        Err(e) => return err(StatusCode::BAD_REQUEST, "header_build", e.to_string(), started, &rid),
+    };
+    if let Ok(v) = HeaderValue::from_str(&referer) {
+        headers.insert(header::REFERER, v);
+    }
+
+    let resp = match state.engine.client().get(&url).headers(headers).send().await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "upstream_error", e.to_string(), started, &rid),
+    };
+    if !resp.status().is_success() {
+        return err(
+            StatusCode::BAD_GATEWAY,
+            "upstream_status",
+            format!("Upstream returned {}", resp.status()),
+            started,
+            &rid,
+        );
+    }
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "upstream_body", e.to_string(), started, &rid),
+    };
+
+    let mut headers = HeaderMap::new();
+    if let Ok(ct) = HeaderValue::from_str(&content_type) {
+        headers.insert(header::CONTENT_TYPE, ct);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400, immutable"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&rid) {
+        headers.insert("x-request-id", v);
+    }
+    (StatusCode::OK, headers, bytes).into_response()
+}
+
+/// Pick the right Referer for a given upstream image host. Hotlink-protected
+/// CDNs always check Referer against the parent site's origin, so we send the
+/// user-facing domain rather than the bare CDN host.
+fn referer_for_host(host: &str) -> String {
+    let h = host.to_lowercase();
+    if h.contains("nhentai.net") || h == "i1.nhentai.net" || h == "i2.nhentai.net" || h == "i3.nhentai.net" || h == "i4.nhentai.net" || h == "t1.nhentai.net" || h == "t2.nhentai.net" || h == "t3.nhentai.net" || h == "t4.nhentai.net" {
+        return "https://nhentai.net/".to_string();
+    }
+    if h.contains("anichin.") || h.contains("wp.com") {
+        return "https://anichin.cafe/".to_string();
+    }
+    if h.contains("cosplaytele.com") {
+        return "https://cosplaytele.com/".to_string();
+    }
+    if h.contains("mangaball.net") || h.contains("poke-black-and-white.net") || h.contains("red-and-blue.net") || h.contains("pokemon-gold-silver.net") || h.contains("pokemon-ruby-sapphire.net") {
+        return "https://mangaball.net/".to_string();
+    }
+    format!("https://{}/", host)
+}
+
+/// Allowlist of upstream hosts the image proxy will fetch from.
+/// This is the second line of defence after the HMAC signature: even if a
+/// signature is somehow forged the proxy will only ever fetch from these hosts.
+fn is_allowed_image_host(url: &str) -> bool {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    let host = match parsed.host_str() {
+        Some(h) => h.to_lowercase(),
+        None => return false,
+    };
+
+    // Mangaball CDNs (pokemon-themed subdomains)
+    if host.ends_with(".poke-black-and-white.net")
+        || host.ends_with(".red-and-blue.net")
+        || host.ends_with(".pokemon-gold-silver.net")
+        || host.ends_with(".pokemon-ruby-sapphire.net")
+        || host == "mangaball.net"
+    {
+        return true;
+    }
+    // Anichin
+    if host.ends_with("anichin.cafe") || host.ends_with("anichin.care") || host.ends_with("anichin.cloud") {
+        return true;
+    }
+    // Anichin uses i*.wp.com Jetpack CDN for some images
+    if host == "i0.wp.com" || host == "i1.wp.com" || host == "i2.wp.com" || host == "i3.wp.com" {
+        return true;
+    }
+    // Cosplaytele
+    if host == "cosplaytele.com" || host.ends_with(".cosplaytele.com") {
+        return true;
+    }
+    // nhentai (main domain + sharded image CDN: i1..i4, t1..t4)
+    if host == "nhentai.net" || host == "nhentai.xxx" || host == "nhentai.to" {
+        return true;
+    }
+    if host.ends_with(".nhentai.net") {
+        return true;
+    }
+
+    false
+}

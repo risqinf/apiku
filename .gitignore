@@ -1,0 +1,24 @@
+# --- Rust build artefacts ---
+/target
+Cargo.lock
+
+# --- App output ---
+output.json
+*.log
+
+# --- IDE / editor metadata (local only) ---
+.kiro/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local secrets / config overrides ---
+.env
+.env.local
+config.local.toml

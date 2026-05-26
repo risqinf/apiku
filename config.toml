@@ -1,0 +1,55 @@
+# Web Scraper Configuration
+# ========================
+
+# Target URLs to scrape
+targets = [
+    # "https://example-manga.com/series/one-piece",
+    # "https://example-donghua.com/anime/soul-land",
+    # "https://example-wordpress.com/blog/post-1",
+]
+
+# Output file path
+output_path = "output.json"
+
+# Maximum concurrent requests (1-100)
+concurrency = 5
+
+# Request timeout in seconds (1-300)
+timeout_secs = 30
+
+# Maximum response body size in bytes (default: 10MB)
+max_body_size = 10485760
+
+# Default rate limit delay in milliseconds (100-60000)
+rate_limit_ms = 1000
+
+# Maximum retry attempts for failed requests
+max_retries = 3
+
+# Base delay for retry backoff in milliseconds
+retry_base_delay_ms = 1000
+
+# JSON indentation (0-8 spaces)
+indent = 2
+
+# Maximum pagination pages to follow
+max_pages = 50
+
+# Default headers for all requests
+[headers]
+Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+Accept-Language = "en-US,en;q=0.9,id;q=0.8"
+# User-Agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Per-domain rate limit overrides (domain -> delay_ms)
+[rate_limits]
+# "mangadex.org" = 2000
+# "example.com" = 500
+
+# Per-site configuration overrides
+# [sites."mangadex.org"]
+# referer = "https://mangadex.org"
+# user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+# rate_limit_ms = 2000
+# [sites."mangadex.org".headers]
+# X-Custom-Header = "value"
