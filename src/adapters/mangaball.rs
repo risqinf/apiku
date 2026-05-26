@@ -15,7 +15,9 @@
 
 use crate::adapters::{FetchContext, SiteAdapter};
 use crate::error::{Result, ScraperError};
-use crate::models::{ChapterInfo, ChapterTranslation, ContentModel, MangaChapter, MangaSeries, PageImage};
+use crate::models::{
+    ChapterInfo, ChapterTranslation, ContentModel, MangaChapter, MangaSeries, PageImage,
+};
 use crate::parser::HtmlParser;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -30,8 +32,10 @@ static CSRF_RE: Lazy<Regex> =
 // Inline JS variables embedded in chapter-detail pages
 static JS_CHAPTER_NUMBER_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"const\s+chapterNumber\s*=\s*[`'"]([^`'"]+)[`'"]"#).unwrap());
-static JS_CHAPTER_IMAGES_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"const\s+chapterImages\s*=\s*JSON\.parse\s*\(\s*[`'"]([\s\S]+?)[`'"]\s*\)"#).unwrap());
+static JS_CHAPTER_IMAGES_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"const\s+chapterImages\s*=\s*JSON\.parse\s*\(\s*[`'"]([\s\S]+?)[`'"]\s*\)"#)
+        .unwrap()
+});
 
 pub struct MangaballAdapter;
 
@@ -71,9 +75,7 @@ impl MangaballAdapter {
 
     /// Extract title ID from a title-detail URL
     fn extract_title_id(url: &str) -> Option<String> {
-        TITLE_ID_RE
-            .captures(url)
-            .map(|c| c[1].to_string())
+        TITLE_ID_RE.captures(url).map(|c| c[1].to_string())
     }
 
     /// Build a MangaSeries from the title-detail HTML page (without chapters yet)
@@ -137,20 +139,20 @@ impl MangaballAdapter {
         let mut adapter_headers: HashMap<String, String> = HashMap::new();
         adapter_headers.insert("X-CSRF-TOKEN".to_string(), csrf.to_string());
         adapter_headers.insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
-        adapter_headers.insert("Accept".to_string(), "application/json, text/javascript, */*; q=0.01".to_string());
+        adapter_headers.insert(
+            "Accept".to_string(),
+            "application/json, text/javascript, */*; q=0.01".to_string(),
+        );
         adapter_headers.insert("Referer".to_string(), page_url.to_string());
         if let Some(cookie) = ctx.cookie_header() {
             adapter_headers.insert("Cookie".to_string(), cookie);
         }
 
-        let headers = ctx
-            .pipeline
-            .build_headers(api_url, ctx.site_config, Some(&adapter_headers))?;
+        let headers =
+            ctx.pipeline
+                .build_headers(api_url, ctx.site_config, Some(&adapter_headers))?;
 
-        let form = [
-            ("title_id", title_id),
-            ("userSettingsEnabled", "true"),
-        ];
+        let form = [("title_id", title_id), ("userSettingsEnabled", "true")];
 
         let response = ctx
             .client
@@ -172,10 +174,11 @@ impl MangaballAdapter {
             });
         }
 
-        let body: serde_json::Value = response.json().await.map_err(|e| ScraperError::HttpError {
-            url: api_url.to_string(),
-            source: e,
-        })?;
+        let body: serde_json::Value =
+            response.json().await.map_err(|e| ScraperError::HttpError {
+                url: api_url.to_string(),
+                source: e,
+            })?;
 
         let chapters_arr = body
             .get("ALL_CHAPTERS")
@@ -239,10 +242,7 @@ impl MangaballAdapter {
                         .get("date")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    let pages = t
-                        .get("pages")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as u32);
+                    let pages = t.get("pages").and_then(|v| v.as_u64()).map(|n| n as u32);
 
                     let translation = ChapterTranslation {
                         url: url.clone(),
@@ -315,9 +315,7 @@ impl MangaballAdapter {
 fn clean_title(s: &str) -> String {
     let trimmed = s.trim();
     // Strip " - Manga Ball" suffix
-    let without_site = trimmed
-        .strip_suffix(" - Manga Ball")
-        .unwrap_or(trimmed);
+    let without_site = trimmed.strip_suffix(" - Manga Ball").unwrap_or(trimmed);
     // Strip " | MangaBall" suffix
     let without_site = without_site
         .strip_suffix(" | MangaBall")
@@ -362,11 +360,24 @@ fn is_real_genre(s: &str) -> bool {
     // Reject common non-genre tokens
     let lower = t.to_lowercase();
     let blacklist = [
-        "off", "on", "all", "beta", "new",
-        "published", "ongoing", "completed", "hiatus", "cancelled",
-        "0 chapters", "1 chapters", "online free",
-        "read comics online", "best comics", "latest comics",
-        "free comics", "read comics",
+        "off",
+        "on",
+        "all",
+        "beta",
+        "new",
+        "published",
+        "ongoing",
+        "completed",
+        "hiatus",
+        "cancelled",
+        "0 chapters",
+        "1 chapters",
+        "online free",
+        "read comics online",
+        "best comics",
+        "latest comics",
+        "free comics",
+        "read comics",
     ];
     for bad in &blacklist {
         if lower == *bad || lower.starts_with(&format!("{}:", bad)) {

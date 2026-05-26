@@ -71,7 +71,11 @@ impl RequestPipeline {
             })
             .unwrap_or_else(|| {
                 // Auto-generate referer from target site's origin
-                format!("{}://{}", parsed_url.scheme(), parsed_url.host_str().unwrap_or(""))
+                format!(
+                    "{}://{}",
+                    parsed_url.scheme(),
+                    parsed_url.host_str().unwrap_or("")
+                )
             });
 
         headers.insert(

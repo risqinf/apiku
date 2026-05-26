@@ -68,8 +68,13 @@ pub fn build_search_url(source: SearchSource, query: &str, page: u32) -> Option<
             }
         }
         SearchSource::Mangaball => None, // Use JSON API instead
-        SearchSource::Nhentai => Some(crate::adapters::nhentai::NhentaiAdapter::api_url_for_search(query, page.max(1))),
-        SearchSource::Novelid => Some(crate::adapters::novelid::NovelidAdapter::search_url(query, page.max(1))),
+        SearchSource::Nhentai => {
+            Some(crate::adapters::nhentai::NhentaiAdapter::api_url_for_search(query, page.max(1)))
+        }
+        SearchSource::Novelid => Some(crate::adapters::novelid::NovelidAdapter::search_url(
+            query,
+            page.max(1),
+        )),
     }
 }
 
@@ -104,7 +109,11 @@ pub struct SearchResults {
 }
 
 /// Parse a search results page from any of the supported sites.
-pub fn parse_search_html(source: SearchSource, base_url: &str, html: &str) -> Vec<SearchResultItem> {
+pub fn parse_search_html(
+    source: SearchSource,
+    base_url: &str,
+    html: &str,
+) -> Vec<SearchResultItem> {
     match source {
         SearchSource::Cosplaytele => parse_cosplaytele_search(base_url, html),
         SearchSource::Anichin => parse_anichin_search(base_url, html),
@@ -168,14 +177,12 @@ pub fn parse_nhentai_search(json: &serde_json::Value) -> Vec<SearchResultItem> {
             })
             // Fallback for the gallery-detail shape where the title is nested
             .or_else(|| {
-                entry
-                    .get("title")
-                    .and_then(|t| {
-                        t.get("english")
-                            .or_else(|| t.get("pretty"))
-                            .or_else(|| t.get("japanese"))
-                            .and_then(|s| s.as_str())
-                    })
+                entry.get("title").and_then(|t| {
+                    t.get("english")
+                        .or_else(|| t.get("pretty"))
+                        .or_else(|| t.get("japanese"))
+                        .and_then(|s| s.as_str())
+                })
             })
             .unwrap_or_default()
             .to_string();
@@ -204,7 +211,11 @@ pub fn parse_nhentai_search(json: &serde_json::Value) -> Vec<SearchResultItem> {
                             "w" => "webp",
                             _ => "jpg",
                         };
-                        build_nhentai_path("t", media_id, &format!("galleries/{}/cover.{}", media_id, ext))
+                        build_nhentai_path(
+                            "t",
+                            media_id,
+                            &format!("galleries/{}/cover.{}", media_id, ext),
+                        )
                     })
             });
 
@@ -262,7 +273,11 @@ fn build_nhentai_path(prefix: &str, media_id: &str, path: &str) -> String {
 
 #[allow(dead_code)]
 fn build_nhentai_cover(media_id: &str, ext: &str) -> String {
-    build_nhentai_path("t", media_id, &format!("galleries/{}/cover.{}", media_id, ext))
+    build_nhentai_path(
+        "t",
+        media_id,
+        &format!("galleries/{}/cover.{}", media_id, ext),
+    )
 }
 
 fn parse_cosplaytele_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
@@ -349,9 +364,7 @@ fn parse_anichin_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
             .next()
             .map(|n| n.text().collect::<Vec<_>>().join("").trim().to_string());
 
-        let title = title_from_attr
-            .or(title_from_h2)
-            .unwrap_or_default();
+        let title = title_from_attr.or(title_from_h2).unwrap_or_default();
         if title.is_empty() {
             continue;
         }
@@ -491,7 +504,11 @@ fn parse_wp_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
             .next()
             .map(|n| {
                 let txt = n.text().collect::<Vec<_>>().join(" ").trim().to_string();
-                if txt.len() > 300 { txt.chars().take(300).collect::<String>() + "..." } else { txt }
+                if txt.len() > 300 {
+                    txt.chars().take(300).collect::<String>() + "..."
+                } else {
+                    txt
+                }
             });
         let thumbnail = el
             .select(&scraper::Selector::parse("img").unwrap())
@@ -615,7 +632,11 @@ pub fn parse_mangaball_search(json: &serde_json::Value) -> Vec<SearchResultItem>
 fn strip_tags(s: &str) -> String {
     static TAG_RE: once_cell::sync::Lazy<regex::Regex> =
         once_cell::sync::Lazy::new(|| regex::Regex::new(r"<[^>]+>").unwrap());
-    TAG_RE.replace_all(s, " ").split_whitespace().collect::<Vec<_>>().join(" ")
+    TAG_RE
+        .replace_all(s, " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Format integer counts compactly (1.2k, 3.4m)

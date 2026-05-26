@@ -154,7 +154,11 @@ impl NhentaiAdapter {
             .and_then(|s| s.as_str())
             .map(|p| build_cdn_url("i", media_id, p));
         // Collect tags into category buckets
-        let tags = json.get("tags").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let tags = json
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let mut authors = Vec::new();
         let mut groups = Vec::new();
         let mut categories = Vec::new();
@@ -180,7 +184,11 @@ impl NhentaiAdapter {
         }
 
         // Build pages from the gallery's `pages` array
-        let pages_raw = json.get("pages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let pages_raw = json
+            .get("pages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let pages: Vec<PageImage> = pages_raw
             .iter()
             .enumerate()
@@ -259,7 +267,11 @@ impl NhentaiAdapter {
             })
             .map(|s| s.to_string());
 
-        let pages_raw = json.get("pages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let pages_raw = json
+            .get("pages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let pages: Vec<PageImage> = pages_raw
             .iter()
             .enumerate()
@@ -367,7 +379,10 @@ mod tests {
 
     #[test]
     fn extract_gallery_id() {
-        assert_eq!(NhentaiAdapter::gallery_id_from_url("https://nhentai.net/g/123/"), Some(123));
+        assert_eq!(
+            NhentaiAdapter::gallery_id_from_url("https://nhentai.net/g/123/"),
+            Some(123)
+        );
         assert_eq!(NhentaiAdapter::gallery_id_from_url("/g/45678"), Some(45678));
         assert_eq!(NhentaiAdapter::gallery_id_from_url("/no-id-here/"), None);
     }

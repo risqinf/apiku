@@ -96,7 +96,7 @@ async fn not_found(req: axum::extract::Request) -> impl IntoResponse {
     });
 
     let mut headers = axum::http::HeaderMap::new();
-    if let Ok(v) = HeaderValue::from_str(&body["meta"]["request_id"].as_str().unwrap_or("")) {
+    if let Ok(v) = HeaderValue::from_str(body["meta"]["request_id"].as_str().unwrap_or("")) {
         headers.insert("x-request-id", v);
     }
     (StatusCode::NOT_FOUND, headers, Json(body))

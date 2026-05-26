@@ -1,6 +1,6 @@
 # --- Rust build artefacts ---
 /target
-Cargo.lock
+# Note: Cargo.lock IS committed for binary crates so CI builds reproducibly.
 
 # --- App output ---
 output.json

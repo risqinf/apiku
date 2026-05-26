@@ -13,13 +13,7 @@ pub struct WordPressAdapter {
 impl WordPressAdapter {
     pub fn new() -> Self {
         Self {
-            wp_indicators: vec![
-                "wp-content",
-                "wp-includes",
-                "wordpress",
-                "wp-json",
-                "/wp/",
-            ],
+            wp_indicators: vec!["wp-content", "wp-includes", "wordpress", "wp-json", "/wp/"],
         }
     }
 

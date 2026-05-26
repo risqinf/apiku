@@ -82,11 +82,21 @@ struct Cli {
     stdout: bool,
 
     /// Log level: error, warn, info, debug, trace
-    #[arg(long = "log", default_value = "info", value_name = "LEVEL", global = true)]
+    #[arg(
+        long = "log",
+        default_value = "info",
+        value_name = "LEVEL",
+        global = true
+    )]
     log_level: String,
 
     /// Log output format: pretty, json, compact
-    #[arg(long = "log-format", default_value = "pretty", value_name = "FORMAT", global = true)]
+    #[arg(
+        long = "log-format",
+        default_value = "pretty",
+        value_name = "FORMAT",
+        global = true
+    )]
     log_format: String,
 
     /// Tee logs to a file (in addition to stderr)
@@ -299,7 +309,10 @@ async fn handle_scrape(cli: &Cli) -> anyhow::Result<()> {
     if cli.summary || output_path.is_some() {
         print_summary(&results);
     }
-    info!(elapsed_ms = start.elapsed().as_millis() as u64, "scrape done");
+    info!(
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "scrape done"
+    );
     Ok(())
 }
 
@@ -470,7 +483,12 @@ fn print_summary(results: &[crate::models::ScrapeResult]) {
     let fail = results.len() - success;
     eprintln!();
     eprintln!("---");
-    eprintln!(" Total: {}, OK: {}, Failed: {}", results.len(), success, fail);
+    eprintln!(
+        " Total: {}, OK: {}, Failed: {}",
+        results.len(),
+        success,
+        fail
+    );
     eprintln!("---");
 }
 

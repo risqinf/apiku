@@ -8,13 +8,19 @@ use regex::Regex;
 use std::collections::HashMap;
 
 static QUALITY_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d{3,4}p)").unwrap());
-static EP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)(?:episode|ep|eps)[\s._-]*(\d+)").unwrap());
+static EP_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(?:episode|ep|eps)[\s._-]*(\d+)").unwrap());
 
 static JS_VIDEO_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new(r#"(?:src|file|url|source)\s*[:=]\s*['"](https?://[^'"]+\.(?:mp4|m3u8|mpd))['"]"#).unwrap(),
-        Regex::new(r#"(?:video_url|stream_url|play_url)\s*[:=]\s*['"](https?://[^'"]+)['"]"#).unwrap(),
-        Regex::new(r#"sources\s*:\s*\[\s*\{\s*(?:file|src)\s*:\s*['"](https?://[^'"]+)['"]"#).unwrap(),
+        Regex::new(
+            r#"(?:src|file|url|source)\s*[:=]\s*['"](https?://[^'"]+\.(?:mp4|m3u8|mpd))['"]"#,
+        )
+        .unwrap(),
+        Regex::new(r#"(?:video_url|stream_url|play_url)\s*[:=]\s*['"](https?://[^'"]+)['"]"#)
+            .unwrap(),
+        Regex::new(r#"sources\s*:\s*\[\s*\{\s*(?:file|src)\s*:\s*['"](https?://[^'"]+)['"]"#)
+            .unwrap(),
     ]
 });
 
@@ -53,8 +59,12 @@ impl DonghuaAdapter {
     fn is_episode_page(&self, html: &str) -> bool {
         let parser = HtmlParser::parse(html);
         // Episode pages typically have video players or download links
-        let has_video = parser.select_one("video, iframe[src*='player'], .player-embed, #pembed").is_some();
-        let has_download = parser.select_one(".download-eps, .download-link, .smokeurl").is_some();
+        let has_video = parser
+            .select_one("video, iframe[src*='player'], .player-embed, #pembed")
+            .is_some();
+        let has_download = parser
+            .select_one(".download-eps, .download-link, .smokeurl")
+            .is_some();
         has_video || has_download
     }
 
@@ -127,9 +137,8 @@ impl DonghuaAdapter {
         let mut episodes = Vec::new();
 
         // Try common episode list selectors
-        let ep_elements = parser.select_all(
-            ".eplister a, .episodelist a, .eps-list a, .listeps a, ul.episodios a",
-        );
+        let ep_elements = parser
+            .select_all(".eplister a, .episodelist a, .eps-list a, .listeps a, ul.episodios a");
 
         for (idx, el) in ep_elements.iter().enumerate() {
             let href = el.value().attr("href").unwrap_or("").to_string();
@@ -179,7 +188,9 @@ impl DonghuaAdapter {
             .and_then(|c| c[1].parse::<u32>().ok())
             .or_else(|| {
                 let title = parser.text("h1").unwrap_or_default();
-                EP_RE.captures(&title).and_then(|c| c[1].parse::<u32>().ok())
+                EP_RE
+                    .captures(&title)
+                    .and_then(|c| c[1].parse::<u32>().ok())
             })
             .unwrap_or(1);
         // Extract video sources
@@ -197,14 +208,23 @@ impl DonghuaAdapter {
         }
     }
 
-    fn extract_video_sources(&self, parser: &HtmlParser, html: &str, base_url: &str) -> Vec<VideoSource> {
+    fn extract_video_sources(
+        &self,
+        parser: &HtmlParser,
+        html: &str,
+        base_url: &str,
+    ) -> Vec<VideoSource> {
         let mut sources = Vec::new();
 
         // 1. Direct video source elements
         for src in parser.attrs("video source", "src") {
             let quality = parser
                 .attr(&format!("source[src='{}']", src), "label")
-                .or_else(|| parser.attr(&format!("source[src='{}']", src), "size").map(|s| format!("{}p", s)));
+                .or_else(|| {
+                    parser
+                        .attr(&format!("source[src='{}']", src), "size")
+                        .map(|s| format!("{}p", s))
+                });
             sources.push(VideoSource {
                 url: resolve_url(base_url, &src),
                 quality,

@@ -37,8 +37,7 @@ use crate::engine::ScraperEngine;
 use crate::fingerprint::BrowserFingerprint;
 use crate::models::{
     ChapterInfo, ContentModel, CosplayPost, DonghuaEpisode, DonghuaSeries, EpisodeInfo,
-    MangaChapter, MangaSeries, NovelChapter, NovelChapterRef, NovelSeries, PageImage,
-    ScrapeResult,
+    MangaChapter, MangaSeries, NovelChapter, NovelChapterRef, NovelSeries, PageImage, ScrapeResult,
 };
 use crate::opaque::{Kind, OpaqueCodec, OpaqueError, Source};
 use crate::search::{
@@ -72,7 +71,11 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    pub fn new(engine: ScraperEngine, codec: OpaqueCodec, sysspec: crate::sysspec::SysSpec) -> Self {
+    pub fn new(
+        engine: ScraperEngine,
+        codec: OpaqueCodec,
+        sysspec: crate::sysspec::SysSpec,
+    ) -> Self {
         let cache = Cache::builder()
             .time_to_live(Duration::from_secs(600))
             .max_capacity(sysspec.scrape_cache_capacity())
@@ -149,7 +152,13 @@ fn ok<T: Serialize>(
 }
 
 /// Build an error JSON response.
-fn err(status: StatusCode, code: &str, message: impl Into<String>, started: Instant, req_id: &str) -> Response {
+fn err(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+    started: Instant,
+    req_id: &str,
+) -> Response {
     let body = ErrorEnvelope {
         status: status.as_u16(),
         ok: false,
@@ -399,7 +408,10 @@ pub struct EndpointDoc {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_opaque(state: &ApiState, opaque: &str) -> Result<crate::opaque::DecodedOpaque, OpaqueError> {
+fn resolve_opaque(
+    state: &ApiState,
+    opaque: &str,
+) -> Result<crate::opaque::DecodedOpaque, OpaqueError> {
     state.codec.decode(opaque)
 }
 
@@ -430,9 +442,15 @@ async fn cached_scrape(state: &ApiState, url: &str) -> Result<(Arc<ScrapeResult>
                 .scrape_all(&[url_owned])
                 .await
                 .map_err(|e| e.to_string())?;
-            let r = results.into_iter().next().ok_or_else(|| "no result".to_string())?;
+            let r = results
+                .into_iter()
+                .next()
+                .ok_or_else(|| "no result".to_string())?;
             if !r.success {
-                return Err(r.error.clone().unwrap_or_else(|| "scrape failed".to_string()));
+                return Err(r
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "scrape failed".to_string()));
             }
             Ok(Arc::new(r))
         })
@@ -670,7 +688,13 @@ pub async fn search(
         .await;
 
     match arc {
-        Ok(data) => ok(StatusCode::OK, (*data).clone(), started, already_cached, &id),
+        Ok(data) => ok(
+            StatusCode::OK,
+            (*data).clone(),
+            started,
+            already_cached,
+            &id,
+        ),
         Err(e) => err(
             StatusCode::BAD_GATEWAY,
             "upstream_error",
@@ -747,7 +771,11 @@ async fn run_single_search(
         Some(u) => u,
         None => return Err(format!("no search URL for source {:?}", source)),
     };
-    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    let html = state
+        .engine
+        .fetch_html(&url)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(parse_search_html(source, &url, &html))
 }
 
@@ -755,7 +783,11 @@ async fn run_single_search(
 /// headers via the fingerprint module so the request looks like a real
 /// nhentai.net visit.
 #[allow(dead_code)]
-async fn search_nhentai(state: &ApiState, query: &str, page: u32) -> Result<Vec<SearchResultItem>, String> {
+async fn search_nhentai(
+    state: &ApiState,
+    query: &str,
+    page: u32,
+) -> Result<Vec<SearchResultItem>, String> {
     search_nhentai_sorted(state, query, page, "").await
 }
 
@@ -765,7 +797,11 @@ async fn search_nhentai_sorted(
     page: u32,
     sort: &str,
 ) -> Result<Vec<SearchResultItem>, String> {
-    let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_search_sorted(query, page.max(1), sort);
+    let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_search_sorted(
+        query,
+        page.max(1),
+        sort,
+    );
     let body = call_nhentai_search_api(state, &url).await?;
     Ok(parse_nhentai_search(&body))
 }
@@ -814,7 +850,11 @@ async fn call_nhentai_search_api(state: &ApiState, url: &str) -> Result<serde_js
 
 async fn search_mangaball(state: &ApiState, query: &str) -> Result<Vec<SearchResultItem>, String> {
     let home_url = "https://mangaball.net/";
-    let home_html = state.engine.fetch_html(home_url).await.map_err(|e| e.to_string())?;
+    let home_html = state
+        .engine
+        .fetch_html(home_url)
+        .await
+        .map_err(|e| e.to_string())?;
     let csrf = match regex::Regex::new(r#"<meta\s+name="csrf-token"\s+content="([^"]+)""#)
         .ok()
         .and_then(|re| re.captures(&home_html).map(|c| c[1].to_string()))
@@ -893,7 +933,13 @@ pub async fn browse(
     let rid = req_id(req.headers());
 
     let p = q.page.max(1);
-    let cache_key = format!("browse:{}|{}|{}|{}", provider, q.feed, p, q.size.unwrap_or(0));
+    let cache_key = format!(
+        "browse:{}|{}|{}|{}",
+        provider,
+        q.feed,
+        p,
+        q.size.unwrap_or(0)
+    );
     let cached = state.search_cache.get(&cache_key).await.is_some();
 
     let provider_lc = provider.to_lowercase();
@@ -917,7 +963,13 @@ pub async fn browse(
 
     match arc {
         Ok(data) => ok(StatusCode::OK, (*data).clone(), started, cached, &rid),
-        Err(e) => err(StatusCode::BAD_GATEWAY, "upstream_error", (*e).clone(), started, &rid),
+        Err(e) => err(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            (*e).clone(),
+            started,
+            &rid,
+        ),
     }
 }
 
@@ -938,33 +990,73 @@ async fn run_browse(
     }
 }
 
-async fn browse_anichin(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+async fn browse_anichin(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+) -> Result<Vec<SearchItemDto>, String> {
     let url = crate::adapters::anichin::AnichinAdapter::browse_url(feed, page);
-    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    let html = state
+        .engine
+        .fetch_html(&url)
+        .await
+        .map_err(|e| e.to_string())?;
     let raw = parse_search_html(SearchSource::Anichin, &url, &html);
-    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+    Ok(raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect())
 }
 
-async fn browse_cosplaytele(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+async fn browse_cosplaytele(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+) -> Result<Vec<SearchItemDto>, String> {
     let url = crate::adapters::cosplaytele::CosplayteleAdapter::browse_url(feed, page);
-    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    let html = state
+        .engine
+        .fetch_html(&url)
+        .await
+        .map_err(|e| e.to_string())?;
     let raw = parse_search_html(SearchSource::Cosplaytele, &url, &html);
-    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+    Ok(raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect())
 }
 
-async fn browse_nhentai(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+async fn browse_nhentai(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+) -> Result<Vec<SearchItemDto>, String> {
     let sort = crate::adapters::nhentai::NhentaiAdapter::feed_to_sort(feed);
     let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_popular(page, sort);
     let body = call_nhentai_search_api(state, &url).await?;
     let raw = parse_nhentai_search(&body);
-    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+    Ok(raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect())
 }
 
-async fn browse_novelid(state: &ApiState, feed: &str, page: u32) -> Result<Vec<SearchItemDto>, String> {
+async fn browse_novelid(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+) -> Result<Vec<SearchItemDto>, String> {
     let url = crate::adapters::novelid::NovelidAdapter::browse_url(feed, page);
-    let html = state.engine.fetch_html(&url).await.map_err(|e| e.to_string())?;
+    let html = state
+        .engine
+        .fetch_html(&url)
+        .await
+        .map_err(|e| e.to_string())?;
     let raw = crate::search::parse_novelid_search(&url, &html);
-    Ok(raw.into_iter().map(|r| raw_search_to_dto(state, r)).collect())
+    Ok(raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect())
 }
 
 /// Mangaball browse: POSTs to `/api/v1/title/search/` with a `search_type`
@@ -976,10 +1068,14 @@ async fn browse_mangaball(
     size: Option<u32>,
 ) -> Result<Vec<SearchItemDto>, String> {
     let stype = crate::adapters::mangaball::MangaballAdapter::browse_search_type(feed);
-    let limit = (size.unwrap_or(30).min(60).max(5) as usize) * (page.max(1) as usize);
+    let limit = (size.unwrap_or(30).clamp(5, 60) as usize) * (page.max(1) as usize);
 
     let home_url = "https://mangaball.net/";
-    let home_html = state.engine.fetch_html(home_url).await.map_err(|e| e.to_string())?;
+    let home_html = state
+        .engine
+        .fetch_html(home_url)
+        .await
+        .map_err(|e| e.to_string())?;
     let csrf = match regex::Regex::new(r#"<meta\s+name="csrf-token"\s+content="([^"]+)""#)
         .ok()
         .and_then(|re| re.captures(&home_html).map(|c| c[1].to_string()))
@@ -1003,10 +1099,7 @@ async fn browse_mangaball(
         .map_err(|e| e.to_string())?;
 
     let limit_str = limit.to_string();
-    let form = [
-        ("search_type", stype),
-        ("search_limit", &limit_str),
-    ];
+    let form = [("search_type", stype), ("search_limit", &limit_str)];
     let resp = state
         .engine
         .client()
@@ -1026,7 +1119,7 @@ async fn browse_mangaball(
     // search parser to handle both, then slice the page window.
     let raw = crate::search::parse_mangaball_search(&body);
     // Crude pagination: take items [(page-1)*size .. page*size]
-    let s = size.unwrap_or(30).min(60).max(5) as usize;
+    let s = size.unwrap_or(30).clamp(5, 60) as usize;
     let start = ((page.max(1) - 1) as usize) * s;
     let end = (start + s).min(raw.len());
     let slice = if start >= raw.len() {
@@ -1034,7 +1127,11 @@ async fn browse_mangaball(
     } else {
         &raw[start..end]
     };
-    Ok(slice.iter().cloned().map(|r| raw_search_to_dto(state, r)).collect())
+    Ok(slice
+        .iter()
+        .cloned()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect())
 }
 
 // ---- Manga ----------------------------------------------------------------
@@ -1049,7 +1146,15 @@ pub async fn manga_series(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Mangaball {
         return err(
@@ -1066,7 +1171,15 @@ pub async fn manga_series(
     };
     let series = match &result.content {
         Some(ContentModel::MangaSeries(s)) => s,
-        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a manga series", started, &rid),
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a manga series",
+                started,
+                &rid,
+            )
+        }
     };
     let dto = manga_series_to_dto(&state, series, &id, pq.page, pq.size);
     ok(StatusCode::OK, dto, started, cached, &rid)
@@ -1138,10 +1251,24 @@ pub async fn manga_chapter(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Mangaball {
-        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not mangaball", started, &rid);
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not mangaball",
+            started,
+            &rid,
+        );
     }
     let (result, cached) = match cached_scrape(&state, &dec.url).await {
         Ok(r) => r,
@@ -1149,7 +1276,15 @@ pub async fn manga_chapter(
     };
     let chap = match &result.content {
         Some(ContentModel::MangaChapter(c)) => c,
-        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a manga chapter", started, &rid),
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a manga chapter",
+                started,
+                &rid,
+            )
+        }
     };
     let dto = manga_chapter_to_dto(&state, chap, &id);
     ok(StatusCode::OK, dto, started, cached, &rid)
@@ -1184,10 +1319,24 @@ pub async fn donghua_series(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Anichin {
-        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not anichin", started, &rid);
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not anichin",
+            started,
+            &rid,
+        );
     }
     let (result, cached) = match cached_scrape(&state, &dec.url).await {
         Ok(r) => r,
@@ -1195,7 +1344,15 @@ pub async fn donghua_series(
     };
     let series = match &result.content {
         Some(ContentModel::DonghuaSeries(s)) => s,
-        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a donghua series", started, &rid),
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a donghua series",
+                started,
+                &rid,
+            )
+        }
     };
     let dto = donghua_series_to_dto(&state, series, &id, pq.page, pq.size);
     ok(StatusCode::OK, dto, started, cached, &rid)
@@ -1230,7 +1387,10 @@ fn donghua_series_to_dto(
         episode_page: p as u32,
         episode_page_size: size as u32,
         episode_total_pages: total_pages as u32,
-        episodes: window.iter().map(|e| episode_ref_to_dto(state, e)).collect(),
+        episodes: window
+            .iter()
+            .map(|e| episode_ref_to_dto(state, e))
+            .collect(),
     }
 }
 
@@ -1251,10 +1411,24 @@ pub async fn donghua_episode(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Anichin {
-        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not anichin", started, &rid);
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not anichin",
+            started,
+            &rid,
+        );
     }
     let (result, cached) = match cached_scrape(&state, &dec.url).await {
         Ok(r) => r,
@@ -1262,7 +1436,15 @@ pub async fn donghua_episode(
     };
     let ep = match &result.content {
         Some(ContentModel::DonghuaEpisode(e)) => e,
-        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a donghua episode", started, &rid),
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a donghua episode",
+                started,
+                &rid,
+            )
+        }
     };
     let dto = donghua_episode_to_dto(&state, ep, &id);
     ok(StatusCode::OK, dto, started, cached, &rid)
@@ -1323,10 +1505,24 @@ pub async fn cosplay_post(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Cosplaytele {
-        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not cosplaytele", started, &rid);
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not cosplaytele",
+            started,
+            &rid,
+        );
     }
     let (result, cached) = match cached_scrape(&state, &dec.url).await {
         Ok(r) => r,
@@ -1334,7 +1530,15 @@ pub async fn cosplay_post(
     };
     let cp = match &result.content {
         Some(ContentModel::CosplayPost(c)) => c,
-        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a cosplay post", started, &rid),
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a cosplay post",
+                started,
+                &rid,
+            )
+        }
     };
     let dto = cosplay_to_dto(&state, cp, &id);
     ok(StatusCode::OK, dto, started, cached, &rid)
@@ -1390,10 +1594,24 @@ pub async fn novel_series(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Novelid {
-        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not novelid", started, &rid);
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not novelid",
+            started,
+            &rid,
+        );
     }
 
     // Always scrape page 1 to get the metadata + first 30 chapters.
@@ -1403,7 +1621,15 @@ pub async fn novel_series(
     };
     let series_p1 = match &result.content {
         Some(ContentModel::NovelSeries(s)) => s.clone(),
-        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a novel series", started, &rid),
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a novel series",
+                started,
+                &rid,
+            )
+        }
     };
 
     // Default per-API-page size
@@ -1417,10 +1643,7 @@ pub async fn novel_series(
     }
 
     // Upstream IS paginated. Compute which upstream pages we need to fetch.
-    let upstream_per_page = series_p1
-        .upstream_chapters_per_page
-        .unwrap_or(30)
-        .max(1);
+    let upstream_per_page = series_p1.upstream_chapters_per_page.unwrap_or(30).max(1);
     let upstream_total = series_p1.upstream_total_pages.unwrap_or(1).max(1);
 
     // Window in absolute chapter indices (0-based)
@@ -1451,8 +1674,9 @@ pub async fn novel_series(
 
     // Fetch the additional upstream pages we don't already have
     // (page 1's chapters live in `series_p1.chapters`).
-    let mut upstream_pages_to_fetch: Vec<u32> =
-        (first_upstream..=last_upstream).filter(|p| *p != 1).collect();
+    let mut upstream_pages_to_fetch: Vec<u32> = (first_upstream..=last_upstream)
+        .filter(|p| *p != 1)
+        .collect();
 
     // Always fetch the last upstream page when we need an accurate total
     // (cheap: it's cached after the first time anyone hits the novel).
@@ -1513,13 +1737,7 @@ pub async fn novel_series(
         .collect();
 
     let dto = build_novel_dto_with_pagination(
-        &state,
-        &series_p1,
-        &id,
-        api_page,
-        api_size,
-        window,
-        est_total,
+        &state, &series_p1, &id, api_page, api_size, window, est_total,
     );
     ok(StatusCode::OK, dto, started, cached, &rid)
 }
@@ -1647,10 +1865,24 @@ pub async fn novel_chapter(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Novelid {
-        return err(StatusCode::BAD_REQUEST, "wrong_source", "ID source is not novelid", started, &rid);
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not novelid",
+            started,
+            &rid,
+        );
     }
     let (result, cached) = match cached_scrape(&state, &dec.url).await {
         Ok(r) => r,
@@ -1658,7 +1890,15 @@ pub async fn novel_chapter(
     };
     let chap = match &result.content {
         Some(ContentModel::NovelChapter(c)) => c,
-        _ => return err(StatusCode::BAD_GATEWAY, "wrong_kind", "URL did not yield a novel chapter", started, &rid),
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a novel chapter",
+                started,
+                &rid,
+            )
+        }
     };
     let dto = novel_chapter_to_dto(&state, chap, &id);
     ok(StatusCode::OK, dto, started, cached, &rid)
@@ -1701,7 +1941,15 @@ pub async fn nhentai_gallery(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Nhentai {
         return err(
@@ -1723,7 +1971,8 @@ pub async fn nhentai_gallery(
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
     };
-    let series = match crate::adapters::nhentai::NhentaiAdapter::parse_gallery_json(&dec.url, &json) {
+    let series = match crate::adapters::nhentai::NhentaiAdapter::parse_gallery_json(&dec.url, &json)
+    {
         Some(s) => s,
         None => {
             return err(
@@ -1749,7 +1998,15 @@ pub async fn nhentai_chapter(
     let rid = req_id(req.headers());
     let dec = match resolve_opaque(&state, &id) {
         Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid_id", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if dec.source != Source::Nhentai {
         return err(
@@ -1768,25 +2025,29 @@ pub async fn nhentai_chapter(
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
     };
-    let chap = match crate::adapters::nhentai::NhentaiAdapter::parse_gallery_as_chapter(&dec.url, &json) {
-        Some(c) => c,
-        None => {
-            return err(
-                StatusCode::BAD_GATEWAY,
-                "wrong_kind",
-                "URL did not yield nhentai pages",
-                started,
-                &rid,
-            )
-        }
-    };
+    let chap =
+        match crate::adapters::nhentai::NhentaiAdapter::parse_gallery_as_chapter(&dec.url, &json) {
+            Some(c) => c,
+            None => {
+                return err(
+                    StatusCode::BAD_GATEWAY,
+                    "wrong_kind",
+                    "URL did not yield nhentai pages",
+                    started,
+                    &rid,
+                )
+            }
+        };
     let dto = manga_chapter_to_dto(&state, &chap, &id);
     ok(StatusCode::OK, dto, started, cached, &rid)
 }
 
 /// Fetch the nhentai JSON API with browser-fingerprint headers and a small
 /// in-memory single-flight cache.
-async fn fetch_nhentai_json(state: &ApiState, api_url: &str) -> Result<(serde_json::Value, bool), String> {
+async fn fetch_nhentai_json(
+    state: &ApiState,
+    api_url: &str,
+) -> Result<(serde_json::Value, bool), String> {
     let key = format!("nhentai_json:{}", api_url);
     let cached = state.cache.get(&key).await.is_some();
 
@@ -1795,7 +2056,7 @@ async fn fetch_nhentai_json(state: &ApiState, api_url: &str) -> Result<(serde_js
     let result = state
         .cache
         .try_get_with(key, async move {
-            let json = call_nhentai_api(&state_clone, &url_owned).await.map_err(|e| e)?;
+            let json = call_nhentai_api(&state_clone, &url_owned).await?;
             // Wrap the JSON in a fake ScrapeResult so we can reuse the
             // existing scrape_cache type. We stash the JSON inside a
             // ContentModel::JsonApi.
@@ -1919,26 +2180,65 @@ pub async fn img_proxy(
     let rid = req_id(req.headers());
 
     if !state.codec.verify_image(&q.p, &q.s) {
-        return err(StatusCode::FORBIDDEN, "bad_signature", "Image proxy signature is invalid", started, &rid);
+        return err(
+            StatusCode::FORBIDDEN,
+            "bad_signature",
+            "Image proxy signature is invalid",
+            started,
+            &rid,
+        );
     }
 
     let url_bytes = match URL_SAFE_NO_PAD.decode(q.p.as_bytes()) {
         Ok(b) => b,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "bad_payload", "Image proxy payload is not valid base64url", started, &rid),
+        Err(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Image proxy payload is not valid base64url",
+                started,
+                &rid,
+            )
+        }
     };
     let url = match String::from_utf8(url_bytes) {
         Ok(u) => u,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "bad_payload", "Image proxy payload is not valid utf-8", started, &rid),
+        Err(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Image proxy payload is not valid utf-8",
+                started,
+                &rid,
+            )
+        }
     };
 
     // Allowlist: only fetch from known upstream hosts.
     if !is_allowed_image_host(&url) {
-        return err(StatusCode::FORBIDDEN, "host_not_allowed", "Image proxy will not fetch this host", started, &rid);
+        return err(
+            StatusCode::FORBIDDEN,
+            "host_not_allowed",
+            "Image proxy will not fetch this host",
+            started,
+            &rid,
+        );
     }
 
-    let domain = match url::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)) {
+    let domain = match url::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+    {
         Some(d) => d,
-        None => return err(StatusCode::BAD_REQUEST, "bad_url", "Could not parse image URL", started, &rid),
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_url",
+                "Could not parse image URL",
+                started,
+                &rid,
+            )
+        }
     };
     let pipeline = state.engine.pipeline();
 
@@ -1952,15 +2252,38 @@ pub async fn img_proxy(
 
     let mut headers = match pipeline.build_headers(&url, None, Some(&fp_headers)) {
         Ok(h) => h,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "header_build", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "header_build",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if let Ok(v) = HeaderValue::from_str(&referer) {
         headers.insert(header::REFERER, v);
     }
 
-    let resp = match state.engine.client().get(&url).headers(headers).send().await {
+    let resp = match state
+        .engine
+        .client()
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await
+    {
         Ok(r) => r,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, "upstream_error", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
     if !resp.status().is_success() {
         return err(
@@ -1979,7 +2302,15 @@ pub async fn img_proxy(
         .to_string();
     let bytes = match resp.bytes().await {
         Ok(b) => b,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, "upstream_body", e.to_string(), started, &rid),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "upstream_body",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
     };
 
     let mut headers = HeaderMap::new();
@@ -2001,7 +2332,16 @@ pub async fn img_proxy(
 /// user-facing domain rather than the bare CDN host.
 fn referer_for_host(host: &str) -> String {
     let h = host.to_lowercase();
-    if h.contains("nhentai.net") || h == "i1.nhentai.net" || h == "i2.nhentai.net" || h == "i3.nhentai.net" || h == "i4.nhentai.net" || h == "t1.nhentai.net" || h == "t2.nhentai.net" || h == "t3.nhentai.net" || h == "t4.nhentai.net" {
+    if h.contains("nhentai.net")
+        || h == "i1.nhentai.net"
+        || h == "i2.nhentai.net"
+        || h == "i3.nhentai.net"
+        || h == "i4.nhentai.net"
+        || h == "t1.nhentai.net"
+        || h == "t2.nhentai.net"
+        || h == "t3.nhentai.net"
+        || h == "t4.nhentai.net"
+    {
         return "https://nhentai.net/".to_string();
     }
     if h.contains("anichin.") || h.contains("wp.com") {
@@ -2010,7 +2350,12 @@ fn referer_for_host(host: &str) -> String {
     if h.contains("cosplaytele.com") {
         return "https://cosplaytele.com/".to_string();
     }
-    if h.contains("mangaball.net") || h.contains("poke-black-and-white.net") || h.contains("red-and-blue.net") || h.contains("pokemon-gold-silver.net") || h.contains("pokemon-ruby-sapphire.net") {
+    if h.contains("mangaball.net")
+        || h.contains("poke-black-and-white.net")
+        || h.contains("red-and-blue.net")
+        || h.contains("pokemon-gold-silver.net")
+        || h.contains("pokemon-ruby-sapphire.net")
+    {
         return "https://mangaball.net/".to_string();
     }
     format!("https://{}/", host)
@@ -2039,7 +2384,10 @@ fn is_allowed_image_host(url: &str) -> bool {
         return true;
     }
     // Anichin
-    if host.ends_with("anichin.cafe") || host.ends_with("anichin.care") || host.ends_with("anichin.cloud") {
+    if host.ends_with("anichin.cafe")
+        || host.ends_with("anichin.care")
+        || host.ends_with("anichin.cloud")
+    {
         return true;
     }
     // Anichin uses i*.wp.com Jetpack CDN for some images

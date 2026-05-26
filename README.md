@@ -1,8 +1,15 @@
 # apiku
 
+[![CI](https://github.com/risqinf/apiku/actions/workflows/ci.yml/badge.svg)](https://github.com/risqinf/apiku/actions/workflows/ci.yml)
+[![Release](https://github.com/risqinf/apiku/actions/workflows/release.yml/badge.svg)](https://github.com/risqinf/apiku/actions/workflows/release.yml)
+[![Live](https://img.shields.io/website?url=https%3A%2F%2Fapi.risqinf.web.id%2Fapi%2Fv1%2Fhealth&label=api.risqinf.web.id)](https://api.risqinf.web.id)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > RESTful scraping API for **Mangaball**, **Anichin**, **Cosplaytele**, **nhentai**, and **NovelID** — one HTTP service that other developers can build manga readers, donghua players, cosplay galleries, doujinshi browsers, and novel readers against, without ever seeing the upstream URLs.
 
+- **Live demo:** <https://api.risqinf.web.id> (hosted on AWS — same binary, same endpoints)
 - **Repo:** <https://github.com/risqinf/apiku>
+- **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
 - **Author:** risqinf
 - **License:** MIT
 - **Version:** see `Cargo.toml`
@@ -40,8 +47,9 @@
 14. [Adaptive tuning](#adaptive-tuning)
 15. [Security model](#security-model)
 16. [Configuration](#configuration)
-17. [Logging](#logging)
-18. [Project layout](#project-layout)
+17. [Deployment](#deployment)
+18. [Logging](#logging)
+19. [Project layout](#project-layout)
 
 ---
 
@@ -59,6 +67,32 @@ cargo build --release
 ```
 
 Open `http://127.0.0.1:3000/` for the tester website. No API key required.
+
+### Try it without building
+
+The same binary is hosted at **<https://api.risqinf.web.id>** (AWS). Every endpoint shown in this README also works there:
+
+```bash
+curl 'https://api.risqinf.web.id/api/v1/info'
+curl 'https://api.risqinf.web.id/api/v1/search?q=Martial+Universe&source=novel'
+curl 'https://api.risqinf.web.id/api/v1/browse/nhentai?feed=popular-today'
+```
+
+The tester website is also live at <https://api.risqinf.web.id/>.
+
+### Pre-built binaries
+
+Releases are auto-built by GitHub Actions on every `v*.*.*` tag. Download from <https://github.com/risqinf/apiku/releases> for:
+
+- `x86_64-unknown-linux-gnu` (Linux glibc, generic)
+- `x86_64-unknown-linux-musl` (Linux static, portable)
+- `aarch64-unknown-linux-gnu` (Linux ARM64 — Raspberry Pi 4/5, AWS Graviton)
+- `x86_64-apple-darwin` (macOS Intel)
+- `aarch64-apple-darwin` (macOS Apple Silicon)
+- `x86_64-pc-windows-msvc` (Windows 64-bit)
+- `aarch64-pc-windows-msvc` (Windows ARM64)
+
+Each archive ships with a SHA-256 checksum; a combined `SHA256SUMS` file is also attached to the release.
 
 ---
 
@@ -547,8 +581,11 @@ All examples make the same request: search "one piece" on Mangaball.
 ### cURL
 
 ```bash
+# Local
 curl 'http://127.0.0.1:3000/api/v1/search?q=one+piece&source=manga'
-curl 'http://127.0.0.1:3000/api/v1/search?q=one+piece&source=manga' | jq .
+
+# Live demo (same shape, hosted on AWS)
+curl 'https://api.risqinf.web.id/api/v1/search?q=one+piece&source=manga' | jq .
 ```
 
 ### JavaScript (browser / Node 18+)
@@ -860,6 +897,96 @@ referer = "https://mangaball.net/"
 ```
 
 All values are optional and have sensible defaults; the file is not required.
+
+---
+
+## Deployment
+
+The reference deployment runs on AWS at <https://api.risqinf.web.id>. Architecture:
+
+- **Compute:** EC2 instance (`apiku serve --bind 127.0.0.1:3000` behind systemd)
+- **Reverse proxy:** nginx terminates TLS, forwards `/` and `/api/v1/*` and `/img` to the local apiku
+- **TLS:** Let's Encrypt via Certbot, auto-renewed
+- **Domain:** `api.risqinf.web.id` → AWS via Route 53 / external DNS provider
+- **Logs:** systemd journald (`apiku --log-format json --log-file /var/log/apiku/apiku.log`)
+- **Image proxy:** the host allowlist already covers every upstream CDN we use, so no extra firewall rules are needed
+
+### Suggested systemd unit
+
+```ini
+# /etc/systemd/system/apiku.service
+[Unit]
+Description=apiku - RESTful scraping API
+After=network.target
+
+[Service]
+User=apiku
+Group=apiku
+Environment=APIKU_SECRET=<long-random-secret>
+ExecStart=/usr/local/bin/apiku serve --bind 127.0.0.1:3000 --log info --log-format json
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Suggested nginx site
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name api.risqinf.web.id;
+
+    ssl_certificate     /etc/letsencrypt/live/api.risqinf.web.id/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.risqinf.web.id/privkey.pem;
+
+    # Long-lived image-proxy responses can be safely cached at the edge
+    location /img {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_buffering on;
+        proxy_cache_valid 200 1d;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+Hardening that the live deployment uses (and you should consider too):
+
+- `APIKU_SECRET` env set to a 64+ character random value so opaque IDs survive restarts
+- nginx-level rate limiting (`limit_req_zone`) on `/api/v1/search`
+- IP allowlist on `/api/v1/info` if you don't want server tuning info public
+- Cloudflare (or another CDN) in front for DDoS protection and TLS termination if you prefer
+
+### Continuous delivery
+
+Pushing a tag like `v0.3.0` runs `.github/workflows/release.yml`, which:
+
+1. Cross-builds the binary for 7 targets (Linux x86_64 glibc + musl, Linux ARM64, macOS Intel + Apple Silicon, Windows x86_64 + ARM64) using `cross` for non-native ones
+2. Strips the binary on Unix targets
+3. Packs each target as `apiku-vX.Y.Z-<target>.{tar.gz,zip}` together with `README.md`, `LICENSE`, and `config.toml`
+4. Generates a per-archive `.sha256` plus a combined `SHA256SUMS`
+5. Publishes a GitHub Release with auto-generated notes
+
+`.github/workflows/ci.yml` runs on every push and PR (Linux, macOS, Windows) and gates merges on `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`, and `cargo test`.
+
+To cut a release locally:
+
+```bash
+git tag v0.3.0
+git push origin v0.3.0
+# Or: trigger the "Release" workflow manually from the Actions tab
+```
 
 ---
 

@@ -142,7 +142,9 @@ impl OpaqueCodec {
         let b = uuid::Uuid::new_v4();
         buf[..16].copy_from_slice(a.as_bytes());
         buf[16..].copy_from_slice(b.as_bytes());
-        Self { secret: buf.to_vec() }
+        Self {
+            secret: buf.to_vec(),
+        }
     }
 
     /// Load from `APIKU_SECRET` env var (deterministic — keeps IDs valid
@@ -152,7 +154,9 @@ impl OpaqueCodec {
             Ok(s) if !s.is_empty() => {
                 use sha2::Digest;
                 let digest = Sha256::digest(s.as_bytes());
-                Self { secret: digest.to_vec() }
+                Self {
+                    secret: digest.to_vec(),
+                }
             }
             _ => Self::from_random(),
         }

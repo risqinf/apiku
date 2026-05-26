@@ -115,13 +115,14 @@ impl CosplayteleAdapter {
             .and_then(|c| c[1].parse::<u32>().ok());
 
         // Cosplayer / Character / Series from the blockquote
-        let blockquote_text = parser
-            .text(".entry-content blockquote")
-            .unwrap_or_default();
+        let blockquote_text = parser.text(".entry-content blockquote").unwrap_or_default();
 
         let cosplayer = extract_field(&blockquote_text, &["cosplayer:", "cosplayer "]);
         let character = extract_field(&blockquote_text, &["character:", "character "]);
-        let series = extract_field(&blockquote_text, &["appear in:", "appear in ", "from:", "series:"]);
+        let series = extract_field(
+            &blockquote_text,
+            &["appear in:", "appear in ", "from:", "series:"],
+        );
 
         // Categories from <a href="/category/...">
         let categories = collect_taxonomy(&parser, "category");
@@ -135,7 +136,9 @@ impl CosplayteleAdapter {
         let tags = dedup_preserving(&tags);
 
         // Author byline
-        let author = parser.text(".meta-author a").or_else(|| parser.text(".byline .meta-author"));
+        let author = parser
+            .text(".meta-author a")
+            .or_else(|| parser.text(".byline .meta-author"));
 
         // Date
         let published_at = parser
@@ -151,7 +154,15 @@ impl CosplayteleAdapter {
         let mut seen = HashSet::new();
         for el in parser.select_all(".entry-content img, .single-page img") {
             // Skip if the image is inside a related-post box
-            if has_ancestor_class(&el, &["box-blog-post", "post-item", "related-posts", "comments-area"]) {
+            if has_ancestor_class(
+                &el,
+                &[
+                    "box-blog-post",
+                    "post-item",
+                    "related-posts",
+                    "comments-area",
+                ],
+            ) {
                 continue;
             }
 
@@ -185,7 +196,9 @@ impl CosplayteleAdapter {
 
         // Video URLs
         let mut videos: Vec<String> = Vec::new();
-        for el in parser.select_all(".entry-content video source, .entry-content video, .entry-content iframe") {
+        for el in parser
+            .select_all(".entry-content video source, .entry-content video, .entry-content iframe")
+        {
             if let Some(src) = el.value().attr("src") {
                 let resolved = resolve_url(url, src);
                 if !videos.contains(&resolved) {
@@ -325,7 +338,10 @@ fn host_for_url(u: &str) -> Option<&'static str> {
         Some("Gofile")
     } else if lower.contains("drive.google.com") {
         Some("Google Drive")
-    } else if lower.contains("t.me") || lower.contains("telegram.me") || lower.contains("telegram.org") {
+    } else if lower.contains("t.me")
+        || lower.contains("telegram.me")
+        || lower.contains("telegram.org")
+    {
         Some("Telegram")
     } else if lower.contains("krakenfiles") {
         Some("Krakenfiles")
@@ -375,12 +391,10 @@ fn extract_unzip_password(html: &str) -> Option<String> {
     // Common patterns:
     //   <input ... value="cosplaytele" />
     //   "Unzip Password: cosplaytele"
-    static PWD_INPUT_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?i)Unzip\s*Password[\s\S]{0,200}?value="([^"]+)""#).unwrap()
-    });
-    static PWD_TEXT_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?i)Unzip\s*Password\s*[:：]\s*([^\s<>]{1,40})"#).unwrap()
-    });
+    static PWD_INPUT_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?i)Unzip\s*Password[\s\S]{0,200}?value="([^"]+)""#).unwrap());
+    static PWD_TEXT_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?i)Unzip\s*Password\s*[:：]\s*([^\s<>]{1,40})"#).unwrap());
 
     if let Some(c) = PWD_INPUT_RE.captures(html) {
         return Some(c[1].to_string());
@@ -405,12 +419,15 @@ impl SiteAdapter for CosplayteleAdapter {
         let mut h = HashMap::new();
         h.insert(
             "Accept".to_string(),
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                .to_string(),
         );
         Some(h)
     }
 
     async fn extract(&self, url: &str, html: &str) -> Result<Vec<ContentModel>> {
-        Ok(vec![ContentModel::CosplayPost(Self::extract_post(url, html))])
+        Ok(vec![ContentModel::CosplayPost(Self::extract_post(
+            url, html,
+        ))])
     }
 }

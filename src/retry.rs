@@ -35,9 +35,7 @@ impl RetryHandler {
         }
 
         match status {
-            Some(status) if status == StatusCode::TOO_MANY_REQUESTS => {
-                RetryDecision::PauseDomain
-            }
+            Some(status) if status == StatusCode::TOO_MANY_REQUESTS => RetryDecision::PauseDomain,
             Some(status) if status.is_server_error() => {
                 RetryDecision::RetryAfter(self.calculate_backoff(attempt))
             }
@@ -87,7 +85,10 @@ impl RetryHandler {
 
         loop {
             attempt += 1;
-            debug!("Request attempt {}/{} for {}", attempt, self.max_attempts, url);
+            debug!(
+                "Request attempt {}/{} for {}",
+                attempt, self.max_attempts, url
+            );
 
             // Wait for rate limiter
             rate_limiter.acquire(domain).await?;
@@ -143,7 +144,11 @@ impl RetryHandler {
                                 continue;
                             }
                             RetryDecision::GiveUp => {
-                                error!("All retry attempts exhausted for {}: HTTP {}", url, status.as_u16());
+                                error!(
+                                    "All retry attempts exhausted for {}: HTTP {}",
+                                    url,
+                                    status.as_u16()
+                                );
                                 return Err(ScraperError::RetriesExhausted {
                                     url: url.to_string(),
                                     reason: format!("HTTP {}", status.as_u16()),
@@ -154,36 +159,38 @@ impl RetryHandler {
                     }
 
                     // 4xx client error (not 429) - don't retry
-                    warn!("Client error {} for {} - not retrying", status.as_u16(), url);
+                    warn!(
+                        "Client error {} for {} - not retrying",
+                        status.as_u16(),
+                        url
+                    );
                     return Err(ScraperError::HttpStatus {
                         url: url.to_string(),
                         status: status.as_u16(),
                     });
                 }
-                Err(e) => {
-                    match self.should_retry(None, attempt) {
-                        RetryDecision::RetryAfter(delay) => {
-                            warn!(
-                                "Network error for {}: {}, retrying in {}ms (attempt {}/{})",
-                                url,
-                                e,
-                                delay.as_millis(),
-                                attempt,
-                                self.max_attempts
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                        RetryDecision::GiveUp => {
-                            error!("All retry attempts exhausted for {}: {}", url, e);
-                            return Err(ScraperError::RetriesExhausted {
-                                url: url.to_string(),
-                                reason: e.to_string(),
-                            });
-                        }
-                        _ => continue,
+                Err(e) => match self.should_retry(None, attempt) {
+                    RetryDecision::RetryAfter(delay) => {
+                        warn!(
+                            "Network error for {}: {}, retrying in {}ms (attempt {}/{})",
+                            url,
+                            e,
+                            delay.as_millis(),
+                            attempt,
+                            self.max_attempts
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
                     }
-                }
+                    RetryDecision::GiveUp => {
+                        error!("All retry attempts exhausted for {}: {}", url, e);
+                        return Err(ScraperError::RetriesExhausted {
+                            url: url.to_string(),
+                            reason: e.to_string(),
+                        });
+                    }
+                    _ => continue,
+                },
             }
         }
     }

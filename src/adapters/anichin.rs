@@ -24,9 +24,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 
-static EP_NUM_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?:episode|ep|eps)[\s._-]*(\d+)").unwrap()
-});
+static EP_NUM_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(?:episode|ep|eps)[\s._-]*(\d+)").unwrap());
 static IFRAME_SRC_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"src="([^"]+)""#).unwrap());
 
 pub struct AnichinAdapter;
@@ -55,7 +54,10 @@ impl AnichinAdapter {
         if p == 1 {
             format!("https://anichin.cafe/seri/?status=&type=&order={}", order)
         } else {
-            format!("https://anichin.cafe/seri/page/{}/?status=&type=&order={}", p, order)
+            format!(
+                "https://anichin.cafe/seri/page/{}/?status=&type=&order={}",
+                p, order
+            )
         }
     }
 
@@ -146,10 +148,7 @@ impl AnichinAdapter {
 
         for li in parser.select_all(".eplister li") {
             // Extract anchor + sub-elements
-            let anchor = match li
-                .select(&scraper::Selector::parse("a").unwrap())
-                .next()
-            {
+            let anchor = match li.select(&scraper::Selector::parse("a").unwrap()).next() {
                 Some(a) => a,
                 None => continue,
             };
@@ -210,7 +209,11 @@ impl AnichinAdapter {
             .iter()
             .filter_map(|el| {
                 let text = el.text().collect::<Vec<_>>().join("").trim().to_string();
-                if text.is_empty() { None } else { Some(text) }
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
             })
             .next();
         let series_title = series_link_text.or_else(|| {
@@ -237,7 +240,12 @@ impl AnichinAdapter {
         let mut sources: Vec<VideoSource> = Vec::new();
         for option in parser.select_all("select.mirror option, select.mirror2 option") {
             let value = option.value().attr("value").unwrap_or("");
-            let label = option.text().collect::<Vec<_>>().join("").trim().to_string();
+            let label = option
+                .text()
+                .collect::<Vec<_>>()
+                .join("")
+                .trim()
+                .to_string();
             if value.is_empty() {
                 continue;
             }
@@ -247,9 +255,9 @@ impl AnichinAdapter {
                 .ok()
                 .and_then(|bytes| String::from_utf8(bytes).ok());
 
-            let src = decoded.as_deref().and_then(|s| {
-                IFRAME_SRC_RE.captures(s).map(|c| c[1].to_string())
-            });
+            let src = decoded
+                .as_deref()
+                .and_then(|s| IFRAME_SRC_RE.captures(s).map(|c| c[1].to_string()));
 
             if let Some(src) = src {
                 let format = if src.contains(".m3u8") {
@@ -288,8 +296,12 @@ impl AnichinAdapter {
         //   <a rel="prev" href="...">  for previous
         //   <a rel="next" href="...">  for next
         //   <span class="nolink">      when there is no next/prev (e.g. last episode)
-        let prev_episode = parser.attr("a[rel='prev']", "href").map(|s| s.trim().to_string());
-        let next_episode = parser.attr("a[rel='next']", "href").map(|s| s.trim().to_string());
+        let prev_episode = parser
+            .attr("a[rel='prev']", "href")
+            .map(|s| s.trim().to_string());
+        let next_episode = parser
+            .attr("a[rel='next']", "href")
+            .map(|s| s.trim().to_string());
 
         DonghuaEpisode {
             series_title,
@@ -354,8 +366,7 @@ fn clean_title(s: &str) -> String {
 /// Strip "Episode N..." trailing text from a title to get the bare series name.
 fn strip_episode_suffix(s: &str) -> String {
     let cleaned = clean_title(s);
-    static SUFFIX_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)\s+Episode\s+\d.*$").unwrap());
+    static SUFFIX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+Episode\s+\d.*$").unwrap());
     SUFFIX_RE.replace(&cleaned, "").trim().to_string()
 }
 
@@ -382,9 +393,13 @@ impl SiteAdapter for AnichinAdapter {
 
     async fn extract(&self, url: &str, html: &str) -> Result<Vec<ContentModel>> {
         if Self::is_series_url(url) {
-            Ok(vec![ContentModel::DonghuaSeries(Self::extract_series(url, html))])
+            Ok(vec![ContentModel::DonghuaSeries(Self::extract_series(
+                url, html,
+            ))])
         } else if Self::is_episode_url(url) {
-            Ok(vec![ContentModel::DonghuaEpisode(Self::extract_episode(url, html))])
+            Ok(vec![ContentModel::DonghuaEpisode(Self::extract_episode(
+                url, html,
+            ))])
         } else {
             // Homepage or other archive — let deep extractor handle it
             Ok(vec![])

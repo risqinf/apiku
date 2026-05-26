@@ -325,7 +325,11 @@ mod tests {
             .iter()
             .map(|u| BrowserFingerprint::for_url(u).label)
             .collect();
-        assert!(labels.len() >= 5, "Only {} distinct fingerprints used", labels.len());
+        assert!(
+            labels.len() >= 5,
+            "Only {} distinct fingerprints used",
+            labels.len()
+        );
     }
 
     #[test]
@@ -339,7 +343,11 @@ mod tests {
     #[test]
     fn platform_detection() {
         for fp in FINGERPRINTS {
-            assert!(fp.platform().is_some(), "Could not detect platform for {}", fp.label);
+            assert!(
+                fp.platform().is_some(),
+                "Could not detect platform for {}",
+                fp.label
+            );
         }
     }
 }

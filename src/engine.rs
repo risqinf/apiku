@@ -126,10 +126,13 @@ impl ScraperEngine {
             })
             .await?;
 
-        let bytes = response.bytes().await.map_err(|e| ScraperError::HttpError {
-            url: url.to_string(),
-            source: e,
-        })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ScraperError::HttpError {
+                url: url.to_string(),
+                source: e,
+            })?;
         if bytes.len() > self.config.max_body_size {
             return Err(ScraperError::ResponseTooLarge {
                 url: url.to_string(),
@@ -152,11 +155,7 @@ impl ScraperEngine {
 
         // Use owned values in the stream so the resulting future is 'static
         // (required by axum / tower handlers).
-        let urls_owned: Vec<(usize, String)> = urls
-            .iter()
-            .cloned()
-            .enumerate()
-            .collect();
+        let urls_owned: Vec<(usize, String)> = urls.iter().cloned().enumerate().collect();
 
         let primary: Vec<ScrapeResult> = stream::iter(urls_owned)
             .map(|(idx, url)| {
@@ -208,7 +207,7 @@ impl ScraperEngine {
             endpoints.len()
         );
 
-        let secondary: Vec<ScrapeResult> = stream::iter(endpoints.into_iter())
+        let secondary: Vec<ScrapeResult> = stream::iter(endpoints)
             .map(|url| {
                 let visited = visited.clone();
                 async move {
@@ -352,10 +351,13 @@ impl ScraperEngine {
             }
         }
 
-        let bytes = response.bytes().await.map_err(|e| ScraperError::HttpError {
-            url: url.to_string(),
-            source: e,
-        })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ScraperError::HttpError {
+                url: url.to_string(),
+                source: e,
+            })?;
 
         if bytes.len() > max_body_size {
             return Err(ScraperError::ResponseTooLarge {
@@ -372,9 +374,8 @@ impl ScraperEngine {
         let body = String::from_utf8_lossy(&bytes).to_string();
 
         if is_json {
-            let data = serde_json::from_str(&body).unwrap_or_else(|_| {
-                serde_json::Value::String(body.clone())
-            });
+            let data = serde_json::from_str(&body)
+                .unwrap_or_else(|_| serde_json::Value::String(body.clone()));
             return Ok(EngineResult {
                 adapter_name: Some("json_api".to_string()),
                 content: Some(ContentModel::JsonApi(JsonApiResponse {
@@ -427,7 +428,11 @@ struct EngineResult {
 /// Capture cookies from a response's Set-Cookie headers into a name->value map
 fn capture_cookies(response: &reqwest::Response) -> HashMap<String, String> {
     let mut cookies = HashMap::new();
-    for value in response.headers().get_all(reqwest::header::SET_COOKIE).iter() {
+    for value in response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+    {
         if let Ok(s) = value.to_str() {
             // Just take the name=value part before the first ';'
             if let Some(pair) = s.split(';').next() {

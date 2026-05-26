@@ -31,12 +31,10 @@ use regex::Regex;
 use std::collections::HashMap;
 
 /// Slug pattern: `/novel/<slug>` (no trailing /bab/)
-static NOVEL_DETAIL_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^/novel/[^/]+/?$").unwrap());
+static NOVEL_DETAIL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^/novel/[^/]+/?$").unwrap());
 
 /// Chapter pattern: `/novel/<slug>/bab/<n>/?`
-static CHAPTER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"/novel/([^/]+)/bab/(\d+)/?").unwrap());
+static CHAPTER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"/novel/([^/]+)/bab/(\d+)/?").unwrap());
 
 pub struct NovelidAdapter;
 
@@ -189,12 +187,15 @@ impl NovelidAdapter {
         let title = parser.text(".detail-title").filter(|s| !s.is_empty());
         // The cover author line is ".detail-author.web-author" with text
         // "Nama Author : Fight007" — strip the prefix.
-        let author = parser.text(".detail-author.web-author").map(|s| {
-            s.replace("Nama Author", "")
-                .trim_start_matches([':', '：', ' '])
-                .trim()
-                .to_string()
-        }).filter(|s| !s.is_empty());
+        let author = parser
+            .text(".detail-author.web-author")
+            .map(|s| {
+                s.replace("Nama Author", "")
+                    .trim_start_matches([':', '：', ' '])
+                    .trim()
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty());
 
         let synopsis = parser
             .inner_html(".detail-desc-info")
@@ -207,9 +208,9 @@ impl NovelidAdapter {
             .attr(".detail-top-right img", "src")
             .map(|s| resolve_url(base_url, &s))
             .or_else(|| {
-                parser.attr(".detail-top", "style").and_then(|style| {
-                    extract_bg_url(&style).map(|u| resolve_url(base_url, &u))
-                })
+                parser
+                    .attr(".detail-top", "style")
+                    .and_then(|style| extract_bg_url(&style).map(|u| resolve_url(base_url, &u)))
             });
 
         let rating = parser
@@ -277,7 +278,11 @@ impl NovelidAdapter {
         // count we observed as a hint, capped to 30 (a single page can
         // legitimately have fewer if it's the last page).
         let upstream_per_page = if paginated {
-            Some(if chapters.len() > 30 { 30 } else { chapters.len().max(1) as u32 })
+            Some(if chapters.len() > 30 {
+                30
+            } else {
+                chapters.len().max(1) as u32
+            })
         } else {
             None
         };
@@ -308,16 +313,15 @@ impl NovelidAdapter {
         let parser = HtmlParser::parse(html);
 
         let series_title = parser.text(".watch-main-title").filter(|s| !s.is_empty());
-        let chapter_title = parser.text(".watch-chapter-title").filter(|s| !s.is_empty());
+        let chapter_title = parser
+            .text(".watch-chapter-title")
+            .filter(|s| !s.is_empty());
 
         // Body: inner HTML of .watch-chapter-detail, sanitised
         let body_html = parser
             .inner_html(".watch-chapter-detail")
             .map(|h| sanitise_chapter_html(&h));
-        let body = body_html
-            .as_deref()
-            .map(html_to_text)
-            .unwrap_or_default();
+        let body = body_html.as_deref().map(html_to_text).unwrap_or_default();
         if body.is_empty() {
             return None;
         }
@@ -333,9 +337,9 @@ impl NovelidAdapter {
             .map(|s| resolve_url(base_url, &s));
 
         // Series URL (strip /bab/N/ off the chapter URL)
-        let series_url = CHAPTER_RE.captures(base_url).map(|c| {
-            format!("https://novelid.org/novel/{}", &c[1])
-        });
+        let series_url = CHAPTER_RE
+            .captures(base_url)
+            .map(|c| format!("https://novelid.org/novel/{}", &c[1]));
 
         let chapter_number = CHAPTER_RE
             .captures(base_url)
@@ -557,7 +561,10 @@ impl SiteAdapter for NovelidAdapter {
             "Accept".to_string(),
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string(),
         );
-        h.insert("Accept-Language".to_string(), "id,en-US;q=0.9,en;q=0.8".to_string());
+        h.insert(
+            "Accept-Language".to_string(),
+            "id,en-US;q=0.9,en;q=0.8".to_string(),
+        );
         Some(h)
     }
 
@@ -596,13 +603,16 @@ mod tests {
     fn url_recognition() {
         assert!(NovelidAdapter::matches_url("https://novelid.org/"));
         assert!(NovelidAdapter::matches_url("https://novelid.org/novel/foo"));
-        assert!(NovelidAdapter::matches_url("https://novelid.org/novel/foo/bab/3/"));
+        assert!(NovelidAdapter::matches_url(
+            "https://novelid.org/novel/foo/bab/3/"
+        ));
         assert!(!NovelidAdapter::matches_url("https://example.com/"));
     }
 
     #[test]
     fn url_kinds() {
-        match NovelidAdapter::url_kind("https://novelid.org/novel/martial-universe-wu-dong/bab/5/") {
+        match NovelidAdapter::url_kind("https://novelid.org/novel/martial-universe-wu-dong/bab/5/")
+        {
             NovelidUrl::Chapter { ref slug, number } => {
                 assert_eq!(slug, "martial-universe-wu-dong");
                 assert_eq!(number, 5);
@@ -625,7 +635,10 @@ mod tests {
 
     #[test]
     fn entity_decoding() {
-        assert_eq!(decode_entities("&ldquo;Wuu.&rdquo;"), "\u{201C}Wuu.\u{201D}");
+        assert_eq!(
+            decode_entities("&ldquo;Wuu.&rdquo;"),
+            "\u{201C}Wuu.\u{201D}"
+        );
         assert_eq!(decode_entities("a &amp; b"), "a & b");
         assert_eq!(decode_entities("&hellip;"), "\u{2026}");
         assert_eq!(decode_entities("&#65;"), "A");
@@ -656,9 +669,15 @@ mod tests {
     #[test]
     fn extract_bg_url_works() {
         let style = "background-image: url(/uploads/foo/bar.webp); height: 100%;";
-        assert_eq!(extract_bg_url(style).as_deref(), Some("/uploads/foo/bar.webp"));
+        assert_eq!(
+            extract_bg_url(style).as_deref(),
+            Some("/uploads/foo/bar.webp")
+        );
         let style2 = "background-image:url('https://example.com/x.jpg')";
-        assert_eq!(extract_bg_url(style2).as_deref(), Some("https://example.com/x.jpg"));
+        assert_eq!(
+            extract_bg_url(style2).as_deref(),
+            Some("https://example.com/x.jpg")
+        );
     }
 
     #[test]
@@ -681,15 +700,21 @@ mod tests {
         let items = NovelidAdapter::parse_search_results("https://novelid.org/", html);
         assert_eq!(items.len(), 1);
         let it = &items[0];
-        assert_eq!(it.title, "Martial Universe (Wu Dong Qian Kun Terjemah Indo)");
-        assert!(it.url.contains("/novel/martial-universe-wu-dong-qian-kun-terjemah-indo"));
+        assert_eq!(
+            it.title,
+            "Martial Universe (Wu Dong Qian Kun Terjemah Indo)"
+        );
+        assert!(it
+            .url
+            .contains("/novel/martial-universe-wu-dong-qian-kun-terjemah-indo"));
         assert!(it.thumbnail.is_some());
         assert!(it.tags.iter().any(|t| t == "Novel Translate"));
         assert!(it.tags.iter().any(|t| t == "Tamat"));
     }
 
     #[test]
-    fn detail_parses_chapters() {        let html = r#"
+    fn detail_parses_chapters() {
+        let html = r#"
             <div class="detail-top-wrapper">
                 <div class="detail-top-left">
                     <p class="detail-author web-author">Nama Author ：Fight007</p>
@@ -792,11 +817,8 @@ mod tests {
                 <div class="watch-next"><a href="https://novelid.org/novel/foo/bab/2/"><span>Episode berikutnya</span></a></div>
             </div>
         "##;
-        let c = NovelidAdapter::parse_chapter(
-            "https://novelid.org/novel/foo/bab/1/",
-            html,
-        )
-        .unwrap();
+        let c =
+            NovelidAdapter::parse_chapter("https://novelid.org/novel/foo/bab/1/", html).unwrap();
         assert_eq!(c.series_title.as_deref(), Some("Martial Universe"));
         assert_eq!(c.chapter_number, 1);
         assert_eq!(c.chapter_title.as_deref(), Some("Lin Dong - Bagian 1"));
@@ -804,6 +826,9 @@ mod tests {
         assert!(c.body.contains("Lin Dong"));
         assert!(c.next_url.as_deref().unwrap().ends_with("/bab/2/"));
         assert!(c.prev_url.is_none(), "prev was {:?}", c.prev_url);
-        assert_eq!(c.series_url.as_deref(), Some("https://novelid.org/novel/foo"));
+        assert_eq!(
+            c.series_url.as_deref(),
+            Some("https://novelid.org/novel/foo")
+        );
     }
 }

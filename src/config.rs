@@ -8,7 +8,7 @@
 //! are validated via `validate()` and rejected with a descriptive error if
 //! out of range.
 
-use crate::error::{ScraperError, Result};
+use crate::error::{Result, ScraperError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;

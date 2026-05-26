@@ -4,9 +4,7 @@
 //! titles, headings, links, images, media, OpenGraph metadata, JSON-LD,
 //! API endpoints, inline JSON, scripts, stylesheets, and forms.
 
-use crate::models::{
-    DeepPage, FormRef, Heading, ImageRef, LinkRef, MediaRef,
-};
+use crate::models::{DeepPage, FormRef, Heading, ImageRef, LinkRef, MediaRef};
 use crate::parser::{resolve_url, HtmlParser};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -15,14 +13,13 @@ use url::Url;
 
 static API_URL_RE: Lazy<Regex> = Lazy::new(|| {
     // Match URLs that look like API endpoints in JSON/JS strings
-    Regex::new(
-        r#"["'`](/(?:api|ajax|graphql|rpc|wp-json|wp-admin/admin-ajax\.php)[^"'`\s]*)["'`]"#,
-    )
-    .unwrap()
+    Regex::new(r#"["'`](/(?:api|ajax|graphql|rpc|wp-json|wp-admin/admin-ajax\.php)[^"'`\s]*)["'`]"#)
+        .unwrap()
 });
 
 static FETCH_CALL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?:fetch|axios\.[a-z]+|\$\.(?:get|post|ajax))\s*\(\s*['"`]([^'"`]+)['"`]"#).unwrap()
+    Regex::new(r#"(?:fetch|axios\.[a-z]+|\$\.(?:get|post|ajax))\s*\(\s*['"`]([^'"`]+)['"`]"#)
+        .unwrap()
 });
 
 static ABS_API_RE: Lazy<Regex> = Lazy::new(|| {
@@ -121,7 +118,9 @@ pub fn extract_deep(url: &str, html: &str, status_code: u16) -> DeepPage {
     }
 
     // --- Links --------------------------------------------------------------
-    let base_host = Url::parse(url).ok().and_then(|u| u.host_str().map(|s| s.to_string()));
+    let base_host = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|s| s.to_string()));
     let mut seen_links: HashSet<String> = HashSet::new();
     let mut links: Vec<LinkRef> = Vec::new();
 
@@ -192,9 +191,7 @@ pub fn extract_deep(url: &str, html: &str, status_code: u16) -> DeepPage {
             .or_else(|| v.attr("data-lazy-src"))
             .or_else(|| v.attr("data-original"))
             .or_else(|| v.attr("data-lazyload"))
-            .or_else(|| {
-                v.attr("src").filter(|s| !is_placeholder_image(s))
-            })
+            .or_else(|| v.attr("src").filter(|s| !is_placeholder_image(s)))
             .or_else(|| v.attr("src"));
 
         let src = match src {
@@ -218,11 +215,7 @@ pub fn extract_deep(url: &str, html: &str, status_code: u16) -> DeepPage {
             .or_else(|| v.attr("data-srcset"))
             .map(|s| {
                 s.split(',')
-                    .filter_map(|part| {
-                        part.split_whitespace()
-                            .next()
-                            .map(|u| resolve_url(url, u))
-                    })
+                    .filter_map(|part| part.split_whitespace().next().map(|u| resolve_url(url, u)))
                     .collect()
             })
             .unwrap_or_default();

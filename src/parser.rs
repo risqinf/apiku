@@ -4,7 +4,7 @@
 //! having to handle missing-element edge cases throughout. Methods here
 //! are infallible and return `None` / empty `Vec` when nothing matches.
 
-use scraper::{Html, Selector, ElementRef};
+use scraper::{ElementRef, Html, Selector};
 
 /// HTML parser wrapper providing CSS selector-based extraction
 pub struct HtmlParser {
@@ -37,9 +37,8 @@ impl HtmlParser {
 
     /// Extract text content from the first element matching a selector
     pub fn text(&self, selector: &str) -> Option<String> {
-        self.select_one(selector).map(|el| {
-            el.text().collect::<Vec<_>>().join("").trim().to_string()
-        })
+        self.select_one(selector)
+            .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
     }
 
     /// Extract an attribute value from the first element matching a selector

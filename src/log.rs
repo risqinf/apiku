@@ -154,7 +154,11 @@ impl LogFormat {
 /// `level` accepts: error / warn / info / debug / trace
 /// `format` accepts: pretty / json / compact
 /// `log_file`: optional path; when set, logs are tee'd to the file too.
-pub fn init(level: &str, format: LogFormat, log_file: Option<&std::path::Path>) -> anyhow::Result<()> {
+pub fn init(
+    level: &str,
+    format: LogFormat,
+    log_file: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let level_filter = match level.to_lowercase().as_str() {
         "error" => "error",
         "warn" => "warn",
@@ -163,8 +167,12 @@ pub fn init(level: &str, format: LogFormat, log_file: Option<&std::path::Path>) 
         "trace" => "trace",
         _ => "info",
     };
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("apiku={},reqwest=warn,tower_http::trace::on_failure=off,tower_http=info", level_filter)));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "apiku={},reqwest=warn,tower_http::trace::on_failure=off,tower_http=info",
+            level_filter
+        ))
+    });
 
     let use_colors = std::io::stderr().is_terminal();
 
@@ -252,18 +260,41 @@ pub fn init(level: &str, format: LogFormat, log_file: Option<&std::path::Path>) 
 /// Banner printed at startup. Uses colours when stderr is a TTY.
 pub fn banner(addr: &std::net::SocketAddr, sysspec: &crate::sysspec::SysSpec) {
     let use_colors = std::io::stderr().is_terminal();
-    let bold = if use_colors { Color::Cyan.bold() } else { Style::new() };
-    let dim = if use_colors { Color::DarkGray.normal() } else { Style::new() };
-    let info = if use_colors { Color::Green.normal() } else { Style::new() };
+    let bold = if use_colors {
+        Color::Cyan.bold()
+    } else {
+        Style::new()
+    };
+    let dim = if use_colors {
+        Color::DarkGray.normal()
+    } else {
+        Style::new()
+    };
+    let info = if use_colors {
+        Color::Green.normal()
+    } else {
+        Style::new()
+    };
 
     eprintln!();
-    eprintln!("{}", bold.paint("  apiku v".to_string() + env!("CARGO_PKG_VERSION")));
+    eprintln!(
+        "{}",
+        bold.paint("  apiku v".to_string() + env!("CARGO_PKG_VERSION"))
+    );
     eprintln!("{}", dim.paint("  RESTful scraping API"));
     eprintln!();
     eprintln!("  {}  http://{}", info.paint("Listening "), addr);
     eprintln!("  {}  http://{}/", info.paint("Tester     "), addr);
-    eprintln!("  {}  http://{}/api/v1/health", info.paint("Health     "), addr);
-    eprintln!("  {}  http://{}/api/v1/info", info.paint("Info       "), addr);
+    eprintln!(
+        "  {}  http://{}/api/v1/health",
+        info.paint("Health     "),
+        addr
+    );
+    eprintln!(
+        "  {}  http://{}/api/v1/info",
+        info.paint("Info       "),
+        addr
+    );
     eprintln!();
     eprintln!(
         "  {}  {} cores, {} MiB RAM, profile: {}",

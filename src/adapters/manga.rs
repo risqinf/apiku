@@ -196,7 +196,7 @@ impl MangaAdapter {
              #chapterlist a, \
              #chapterlist li a, \
              .eph-num a, \
-             .clstyle li a"
+             .clstyle li a",
         );
 
         for (idx, el) in chapter_elements.iter().enumerate() {
@@ -204,7 +204,12 @@ impl MangaAdapter {
 
             // Try to get just the chapter name span (ignoring dates etc.)
             let name_text = el
-                .select(&scraper::Selector::parse(".mk-chapter-list__name, .chapternum, .chapter-name, .num-chapter").unwrap())
+                .select(
+                    &scraper::Selector::parse(
+                        ".mk-chapter-list__name, .chapternum, .chapter-name, .num-chapter",
+                    )
+                    .unwrap(),
+                )
                 .next()
                 .map(|n| n.text().collect::<Vec<_>>().join("").trim().to_string());
 
@@ -275,9 +280,11 @@ impl MangaAdapter {
             .captures(url)
             .and_then(|c| c[1].parse::<f64>().ok())
             .or_else(|| {
-                parser
-                    .text("h1")
-                    .and_then(|t| CHAPTER_RE.captures(&t).and_then(|c| c[1].parse::<f64>().ok()))
+                parser.text("h1").and_then(|t| {
+                    CHAPTER_RE
+                        .captures(&t)
+                        .and_then(|c| c[1].parse::<f64>().ok())
+                })
             })
             .unwrap_or(1.0);
 
@@ -291,7 +298,7 @@ impl MangaAdapter {
              .container-chapter-reader img, \
              .page-break img, \
              #anime_body_main img, \
-             .reader-area img"
+             .reader-area img",
         );
 
         // Filter out covers/thumbnails of related manga (typically smaller images
@@ -324,7 +331,8 @@ impl MangaAdapter {
 
 /// Pick the first Some value from a slice of Option<String>
 fn first_some(opts: &[Option<String>]) -> Option<String> {
-    opts.iter().find_map(|o| o.clone().filter(|s| !s.trim().is_empty()))
+    opts.iter()
+        .find_map(|o| o.clone().filter(|s| !s.trim().is_empty()))
 }
 
 /// Clean common author/artist prefixes that appear in scraped text:
@@ -336,8 +344,13 @@ fn clean_author(s: String) -> String {
     let lower = trimmed.to_lowercase();
     // Try with-space prefixes first, then without-space (concatenated spans)
     for prefix in [
-        "oleh ", "by ", "author: ", "penulis: ", "pengarang: ",
-        "oleh", "by",
+        "oleh ",
+        "by ",
+        "author: ",
+        "penulis: ",
+        "pengarang: ",
+        "oleh",
+        "by",
     ] {
         if lower.starts_with(prefix) {
             // Slice the original (preserving casing) by matching prefix length
@@ -357,7 +370,10 @@ fn extract_table_field(parser: &HtmlParser, keywords: &[&str]) -> Option<String>
         for kw in keywords {
             if text.contains(kw) {
                 // Get last cell text
-                if let Some(td) = el.select(&scraper::Selector::parse("td:last-child").unwrap()).next() {
+                if let Some(td) = el
+                    .select(&scraper::Selector::parse("td:last-child").unwrap())
+                    .next()
+                {
                     let val = td.text().collect::<Vec<_>>().join(" ").trim().to_string();
                     if !val.is_empty() {
                         return Some(val);
@@ -388,7 +404,11 @@ impl SiteAdapter for MangaAdapter {
     fn headers(&self) -> Option<HashMap<String, String>> {
         // Some manga sites need specific headers
         let mut headers = HashMap::new();
-        headers.insert("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8".to_string());
+        headers.insert(
+            "Accept".to_string(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                .to_string(),
+        );
         Some(headers)
     }
 
