@@ -10,22 +10,26 @@
 - **Live demo:** <https://api.risqinf.web.id> (hosted on AWS — same binary, same endpoints)
 - **Repo:** <https://github.com/risqinf/apiku>
 - **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
-- **Author:** risqinf
+- **Author:** [@risqinf](https://github.com/risqinf)
 - **License:** MIT
-- **Version:** see `Cargo.toml`
+- **Version:** 0.2.1 (see `Cargo.toml`)
 
 ---
 
 ## Highlights
 
-- **One API, five providers.** Manga, donghua, cosplay archives, doujinshi catalogues, and Indonesian novels behind a uniform JSON envelope.
+- **One API, five providers.** Manga/komik, donghua, cosplay archives, doujinshi catalogues, and Indonesian novels behind a uniform JSON envelope.
 - **Opaque IDs.** Resource IDs are HMAC-SHA256-signed tokens. Consumers never see upstream URLs.
 - **Image proxy.** Every cover, page and thumbnail is rewritten to a signed local proxy. Source CDNs stay hidden.
+- **Cosplay video → HLS, server-resolved.** Cosplaytele videos are served via an encrypted third-party embed (`cossora.stream`) that blocks plain iframes. apiku fetches the embed with the right Referer, **decrypts the real `.m3u8` URL server-side (AES-256-CBC)**, and hands the client a playable HLS stream. Only the tiny playlists are proxied — the heavy `.ts` segments stream **directly from the CDN to the client** to save bandwidth. No iframe embeds anywhere.
+- **High-precision search.** Cosplaytele's loose WordPress search and its recommendation carousels are stripped out, then results are relevance-filtered so a query like `xiaoyaoyaoyao` returns only that cosplayer. Cosplayer names and doujin tags are **clickable** and jump to a filtered search.
 - **Browser fingerprint rotation.** Outbound requests pick a coherent identity (Windows/Chrome, macOS/Safari, Android/Chrome, iPhone/Safari, Linux/Firefox, ...) per upstream URL — coupled with proper Sec-CH-UA, Sec-Fetch-* and Referer spoofing so origin checks and hotlink protection see a real browser visiting the source site.
 - **Adaptive runtime.** CPU and RAM are detected at startup; tokio threads, HTTP concurrency, and cache sizes are tuned automatically.
+- **Client-side prefetch.** The web app warms the next likely detail/episode/chapter/page during idle time, so navigation feels instant.
 - **Single-flight cache.** Concurrent requests for the same URL collapse into one upstream fetch.
 - **Browse + search + detail + paged chapter list** for every provider.
-- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform with a modern Google-style aurora UI: home rows, per-provider browse with feed filters, search with per-source filter chips, donghua player with server switching, manga/doujin reader, novel text reader, and cosplay galleries. Manga detail pages **group chapters by language** with one-tap language tabs. Includes a responsive navbar (desktop bar + mobile drawer), light/dark theme toggle, an in-app **API Docs** page (cURL + JS/Python/PHP/Go/Rust samples), an inline **API Explorer**, and an **18+ toggle** that hides the adult providers (Cosplay, Doujin) until explicitly enabled.
+- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform with a modern UI: animated aurora + color-flow grid background, home rows, per-provider browse with feed filters, search with per-source filter chips, donghua player with server switching, manga/doujin reader with fullscreen, novel text reader, cosplay galleries with inline HLS video, and per-detail recommendations. Manga detail pages **group chapters by language** with one-tap language tabs that persist across pagination. Includes a responsive navbar (desktop bar + mobile drawer with real-time toggle switches), light/dark theme toggle, an in-app **API Docs** page, an inline **API Explorer** with copy-ready multi-language code samples, and an **18+ toggle** (clear age-verification modal) that hides the adult providers (Cosplay, Doujin) until explicitly enabled.
+- **Configurable branding, no recompile.** Site name, tagline, logo, footer, ad slots, and SEO/ad-network verification snippets are driven by a `[web]` block in `config.toml` and/or environment variables — see [Branding & customization](#branding--customization). Drop a `logo.*` into `public/` and it's auto-detected.
 - **Developer API console at `/tester`.** Live request playground, multi-language code examples, full reference, security notes.
 
 ---
@@ -48,9 +52,11 @@
 14. [Adaptive tuning](#adaptive-tuning)
 15. [Security model](#security-model)
 16. [Configuration](#configuration)
-17. [Deployment](#deployment)
-18. [Logging](#logging)
-19. [Project layout](#project-layout)
+17. [Branding & customization](#branding--customization)
+18. [Deployment](#deployment)
+19. [Logging](#logging)
+20. [Project layout](#project-layout)
+21. [Roadmap](#roadmap)
 
 ---
 
@@ -152,12 +158,14 @@ Base URL: `http://127.0.0.1:3000` (local) — base path: `/api/v1`.
 | `GET` | `/api/v1/manga/chapter/{id}` | Manga chapter pages |
 | `GET` | `/api/v1/donghua/{id}?page=N&size=N` | Donghua series detail (Anichin) — episode list paginated |
 | `GET` | `/api/v1/donghua/episode/{id}` | Donghua episode (servers + downloads) |
-| `GET` | `/api/v1/cosplay/{id}` | Cosplay post (gallery + downloads) |
+| `GET` | `/api/v1/cosplay/{id}` | Cosplay post (gallery + resolved video + downloads) |
+| `GET` | `/api/v1/cosplay-video?p=...&s=...` | Resolve a Cosplaytele embed into a playable HLS stream URL |
 | `GET` | `/api/v1/novel/{id}?page=N&size=N` | Novel series detail (NovelID) — chapter list paginated, supports upstream-paginated novels with thousands of chapters |
 | `GET` | `/api/v1/novel/chapter/{id}` | Novel chapter (text body, plus prev/next IDs) |
 | `GET` | `/api/v1/nhentai/{id}` | nhentai gallery (browser-fingerprint spoofed) |
 | `GET` | `/api/v1/nhentai/chapter/{id}` | nhentai gallery as a chapter (proxied page list) |
 | `GET` | `/img?p={payload}&s={signature}` | Signed image proxy |
+| `GET` | `/hls?p={payload}&s={signature}` | HLS playlist proxy (segments stream direct from CDN to the client) |
 
 Every response carries a generated `X-Request-Id` header echoed in `meta.request_id`.
 
@@ -419,7 +427,7 @@ Every endpoint shares the same JSON envelope.
     "published_at": "2026-05-25T16:16:34+08:00",
     "cover": "/img?p=...&s=...",
     "images": ["/img?p=...&s=...", "/img?p=...&s=..."],
-    "videos": [],
+    "videos": ["/api/v1/cosplay-video?p=...&s=..."],
     "downloads": [
       { "name": "Download Telegram", "url": "https://t.me/+..." }
     ],
@@ -428,6 +436,8 @@ Every endpoint shares the same JSON envelope.
   "meta": { "took_ms": 220, "cached": false, "request_id": "..." }
 }
 ```
+
+`videos[]` entries that point at `/api/v1/cosplay-video?...` resolve to a playable HLS stream — call that endpoint to get `{ "type": "hls", "url": "/hls?..." }`, then play the `/hls` URL with hls.js (or natively on Safari). Heavy video segments stream straight from the CDN to the client; only the playlist passes through the server.
 
 ### `GET /api/v1/novel/{id}?page=1&size=30`
 
@@ -901,6 +911,70 @@ All values are optional and have sensible defaults; the file is not required.
 
 ---
 
+## Branding & customization
+
+The consumer web app served at `/` can be fully rebranded and monetized **without recompiling** — everything is read at server start and injected into the SPA. Configure it in the `[web]` block of `config.toml`:
+
+```toml
+[web]
+# Shown in the header, drawer, and browser tab title.
+site_name = "NontonKu"
+
+# Home hero tagline.
+tagline = "Streaming donghua, baca komik & novel, galeri cosplay - semua dalam satu platform."
+
+# Custom logo. Leave empty to auto-detect (see below) or use the built-in mark.
+# Absolute URL or a root path served from `static_dir` (e.g. "/logo.svg").
+logo_url = ""
+
+# Footer HTML. Empty -> a minimal "<site_name> (c) <year>" line.
+footer_html = ""
+
+# Raw HTML injected into <head> (SEO / ad-network verification, analytics).
+head_html = '<meta name="google-site-verification" content="XXXX">'
+
+# Raw HTML injected just before </body> (deferred scripts).
+body_html = ""
+
+# Directory served at the site root for verification files, ads.txt,
+# sitemap.xml, robots.txt, favicons, and custom logos.
+static_dir = "public"
+
+# Named ad slots rendered at fixed positions. Known slots: home, browse, reader.
+[web.ads]
+home   = '<ins class="adsbygoogle" ...></ins>'
+reader = ''
+```
+
+### Changing the site name (no rebuild)
+
+Two ways, both outside the binary:
+
+- **Config file:** set `site_name` in `[web]` and restart `apiku serve`.
+- **Environment variables** (win over the config file — handy for Docker / systemd):
+
+  | Variable | Overrides |
+  |---|---|
+  | `APIKU_SITE_NAME` | site name |
+  | `APIKU_TAGLINE` | hero tagline |
+  | `APIKU_LOGO_URL` | logo |
+  | `APIKU_STATIC_DIR` | static directory |
+
+  ```bash
+  APIKU_SITE_NAME="NontonKu" apiku serve
+  ```
+
+### Custom logo
+
+- **Auto-detect (easiest):** drop a `logo.*` (or `favicon.*`) file into `public/` — `logo.svg`, `logo.png`, `logo.webp`, `logo.jpg`, `logo.gif`, `logo.ico` are detected in that priority order, no config needed. Restart and it appears in the header, drawer, and as the favicon.
+- **Manual:** set `logo_url = "/brand.png"` (file in `public/`) or an absolute URL. Manual value always wins over auto-detect.
+
+### Static files & verification (`public/`)
+
+Anything in `static_dir` (default `public/`) is served at the site root for a single path segment — e.g. `public/google1234.html` → `https://your-domain/google1234.html`. Use it for `ads.txt` / `app-ads.txt`, search-engine verification files, `robots.txt`, `sitemap.xml`, favicons, and logos. Path traversal is rejected, and API / SPA / proxy routes always take precedence. See [`public/README.md`](public/README.md) for the full guide.
+
+---
+
 ## Deployment
 
 The reference deployment runs on AWS at <https://api.risqinf.web.id>. Architecture:
@@ -1028,6 +1102,7 @@ src/
 ├── app.css            Web app stylesheet (compiled in)
 ├── app.js             Web app SPA router + views (compiled in)
 ├── opaque.rs          HMAC-SHA256 opaque ID + image-proxy signing
+├── cossora.rs         Cosplaytele video resolver (AES-256-CBC decrypt of cossora.stream embeds -> HLS)
 ├── fingerprint.rs     Browser fingerprint catalogue (Win/macOS/Linux/Android/iOS)
 ├── search.rs          Cross-provider search abstraction
 ├── sysspec.rs         CPU/RAM detection and tuning
@@ -1048,6 +1123,35 @@ src/
     ├── nhentai.rs     nhentai doujinshi adapter (JSON API + sharded CDN + popular feeds)
     └── novelid.rs     NovelID Indonesian novel adapter (HTML, upstream-paginated chapter lists)
 ```
+
+---
+
+## Roadmap
+
+Planned work, roughly in priority order. Contributions and suggestions welcome via [issues](https://github.com/risqinf/apiku/issues).
+
+### Next up
+
+- [ ] **Stream Anime** — add a dedicated anime streaming provider alongside donghua (subbed/dubbed episodes, multi-server playback, quality/download mirrors), reusing the existing HLS resolver + player pipeline. **This is the next major target.**
+
+### Backlog
+
+- [ ] More providers (additional manga / donghua / novel sources) behind the same envelope.
+- [ ] Watch/read history & resume (client-side, then optional sync).
+- [ ] Favorites / bookmarks with import-export.
+- [ ] Server-rendered meta tags per detail page for richer link previews & SEO.
+- [ ] Optional API-key / rate-tier layer for public deployments.
+- [ ] PWA: offline shell + installable web app.
+- [ ] More language samples and an OpenAPI spec for the Explorer.
+
+### Done
+
+- [x] Cosplay video playback via server-side HLS resolution (no iframe embeds).
+- [x] High-precision Cosplaytele search + clickable cosplayer/tag pills.
+- [x] Configurable branding (name/tagline/logo/footer/ads) via config + env, with logo auto-detection.
+- [x] Reworked API Explorer with grouped endpoints and copy-ready multi-language samples.
+- [x] Modern UI: animated background, real-time toggle switches, light/dark theme.
+- [x] Full episode lists for donghua, language-grouped manga chapters, NovelID upstream pagination.
 
 ---
 
