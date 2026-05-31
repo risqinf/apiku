@@ -25,7 +25,7 @@
 - **Adaptive runtime.** CPU and RAM are detected at startup; tokio threads, HTTP concurrency, and cache sizes are tuned automatically.
 - **Single-flight cache.** Concurrent requests for the same URL collapse into one upstream fetch.
 - **Browse + search + detail + paged chapter list** for every provider.
-- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform: home rows, per-provider browse with feed filters, search, donghua player with server switching, manga/doujin reader, novel text reader, and cosplay galleries. Includes a light/dark theme toggle, an inline **API Explorer**, and an **18+ toggle** that hides the adult providers (Cosplay, Doujin) until explicitly enabled.
+- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform with a modern Google-style aurora UI: home rows, per-provider browse with feed filters, search with per-source filter chips, donghua player with server switching, manga/doujin reader, novel text reader, and cosplay galleries. Manga detail pages **group chapters by language** with one-tap language tabs. Includes a responsive navbar (desktop bar + mobile drawer), light/dark theme toggle, an in-app **API Docs** page (cURL + JS/Python/PHP/Go/Rust samples), an inline **API Explorer**, and an **18+ toggle** that hides the adult providers (Cosplay, Doujin) until explicitly enabled.
 - **Developer API console at `/tester`.** Live request playground, multi-language code examples, full reference, security notes.
 
 ---
