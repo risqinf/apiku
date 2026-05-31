@@ -24,12 +24,14 @@
 use crate::api::{self, ApiState};
 use crate::tester;
 use crate::webapp;
-use axum::http::{HeaderName, HeaderValue, StatusCode};
-use axum::response::IntoResponse;
+use axum::extract::Path as AxumPath;
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use std::net::SocketAddr;
+use std::path::{Component, PathBuf};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
@@ -38,11 +40,17 @@ use tower_http::trace::TraceLayer;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 /// Build the axum router with all routes + middleware applied.
-pub fn build_router(state: ApiState) -> Router {
+///
+/// `static_dir` is the directory served at the site root for verification
+/// files (`google1234.html`), `ads.txt`, `sitemap.xml`, `robots.txt`,
+/// favicons, and custom logos.
+pub fn build_router(state: ApiState, static_dir: &str) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+
+    let static_root = PathBuf::from(static_dir);
 
     Router::new()
         // Consumer web app (streaming / reading platform)
@@ -58,6 +66,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/donghua/{id}", get(api::donghua_series))
         .route("/api/v1/donghua/episode/{id}", get(api::donghua_episode))
         .route("/api/v1/cosplay/{id}", get(api::cosplay_post))
+        .route("/api/v1/cosplay-video", get(api::cosplay_video))
         .route("/api/v1/novel/{id}", get(api::novel_series))
         .route("/api/v1/novel/chapter/{id}", get(api::novel_chapter))
         .route("/api/v1/browse/{provider}", get(api::browse))
@@ -65,6 +74,18 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/v1/nhentai/chapter/{id}", get(api::nhentai_chapter))
         // Image proxy
         .route("/img", get(api::img_proxy))
+        // HLS playlist/segment proxy (cosplay video streams)
+        .route("/hls", get(api::hls_proxy))
+        // Static assets / verification files served from `static_dir`.
+        // Single-segment only (e.g. /google1234.html, /ads.txt, /logo.svg) so
+        // it never shadows the API or SPA routes.
+        .route(
+            "/{file}",
+            get({
+                let root = static_root.clone();
+                move |path| serve_static(root.clone(), path)
+            }),
+        )
         // 404 fallback returning a proper envelope
         .fallback(not_found)
         // Layers (innermost first when applied)
@@ -74,6 +95,67 @@ pub fn build_router(state: ApiState) -> Router {
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Serve a single file from the configured static directory.
+///
+/// Used for SEO / ad-network verification files (`googleXXXX.html`,
+/// `ads.txt`, `app-ads.txt`, `sitemap.xml`, `robots.txt`), favicons, and
+/// custom branding assets. The filename is a single path segment; any
+/// traversal attempt (`.`/`..`/separators) is rejected.
+async fn serve_static(root: PathBuf, AxumPath(file): AxumPath<String>) -> Response {
+    // Reject path traversal and nested separators outright.
+    if file.is_empty()
+        || file.contains('/')
+        || file.contains('\\')
+        || PathBuf::from(&file)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let path = root.join(&file);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let mut headers = HeaderMap::new();
+    if let Ok(ct) = HeaderValue::from_str(content_type_for(&file)) {
+        headers.insert(header::CONTENT_TYPE, ct);
+    }
+    // Verification files must not be cached aggressively; assets can be.
+    let cache = if file.ends_with(".html") || file.ends_with(".txt") || file.ends_with(".xml") {
+        "public, max-age=300"
+    } else {
+        "public, max-age=86400"
+    };
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    (StatusCode::OK, headers, bytes).into_response()
+}
+
+/// Minimal extension -> MIME map for static files.
+fn content_type_for(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Default 404 handler returning a JSON envelope rather than a blank page.
@@ -107,8 +189,8 @@ async fn not_found(req: axum::extract::Request) -> impl IntoResponse {
 }
 
 /// Bind to `addr` and run the server until shutdown.
-pub async fn run(state: ApiState, addr: SocketAddr) -> anyhow::Result<()> {
-    let app = build_router(state);
+pub async fn run(state: ApiState, addr: SocketAddr, static_dir: &str) -> anyhow::Result<()> {
+    let app = build_router(state, static_dir);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(addr = %addr, "server listening");
     axum::serve(listener, app).await?;

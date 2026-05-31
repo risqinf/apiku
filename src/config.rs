@@ -66,6 +66,85 @@ pub struct AppConfig {
     /// Maximum pagination pages to follow
     #[serde(default = "default_max_pages")]
     pub max_pages: usize,
+
+    /// Consumer web app branding / customization (logo, name, ads, etc.)
+    #[serde(default)]
+    pub web: WebConfig,
+}
+
+/// Branding and customization for the consumer web app served at `/`.
+///
+/// Everything here is read at server start and injected into the SPA shell,
+/// so operators can rebrand the site, add search-engine / ad-network
+/// verification snippets, and place ads without recompiling the binary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebConfig {
+    /// Site name shown in the header, drawer, and `<title>`.
+    #[serde(default = "default_site_name")]
+    pub site_name: String,
+
+    /// Short tagline shown on the home hero banner.
+    #[serde(default = "default_tagline")]
+    pub tagline: String,
+
+    /// Optional custom logo image URL. When empty a built-in gradient mark
+    /// is used. Can be an absolute URL or a path served from `static_dir`
+    /// (e.g. `/logo.svg`).
+    #[serde(default)]
+    pub logo_url: String,
+
+    /// Footer HTML. When empty the footer shows a minimal default. Set to a
+    /// single space or your own markup to override; raw HTML is allowed.
+    #[serde(default)]
+    pub footer_html: String,
+
+    /// Raw HTML injected into `<head>` (meta verification tags, analytics,
+    /// ad-network loader scripts, etc.).
+    #[serde(default)]
+    pub head_html: String,
+
+    /// Raw HTML injected just before `</body>` (deferred ad/analytics
+    /// scripts).
+    #[serde(default)]
+    pub body_html: String,
+
+    /// Directory served at the site root for verification files, `ads.txt`,
+    /// `sitemap.xml`, favicons, custom logos, etc. Relative to the working
+    /// directory. Missing directory is fine (those paths just 404).
+    #[serde(default = "default_static_dir")]
+    pub static_dir: String,
+
+    /// Named ad slots (slot key -> raw HTML). The web app renders known slots
+    /// at fixed positions: `home`, `browse`, `detail`, `reader`.
+    #[serde(default)]
+    pub ads: HashMap<String, String>,
+}
+
+fn default_site_name() -> String {
+    "apiku".to_string()
+}
+
+fn default_tagline() -> String {
+    "Streaming donghua, baca komik & novel, galeri cosplay - semua dalam satu platform.".to_string()
+}
+
+fn default_static_dir() -> String {
+    "public".to_string()
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            site_name: default_site_name(),
+            tagline: default_tagline(),
+            logo_url: String::new(),
+            footer_html: String::new(),
+            head_html: String::new(),
+            body_html: String::new(),
+            static_dir: default_static_dir(),
+            ads: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +215,7 @@ impl Default for AppConfig {
             sites: HashMap::new(),
             rate_limits: HashMap::new(),
             max_pages: default_max_pages(),
+            web: WebConfig::default(),
         }
     }
 }

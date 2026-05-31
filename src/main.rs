@@ -11,6 +11,7 @@
 mod adapters;
 mod api;
 mod config;
+mod cossora;
 mod deep_extractor;
 mod engine;
 mod error;
@@ -388,6 +389,28 @@ async fn handle_serve(bind: &str, cli: &Cli, sysspec: SysSpec) -> anyhow::Result
         config.rate_limit_ms = 400;
     }
 
+    // Capture web/branding config before the engine takes ownership of `config`.
+    let mut web_config = config.web.clone();
+
+    // Environment-variable overrides (handy for Docker / systemd deployments
+    // where editing config.toml is awkward). Any of these, when set and
+    // non-empty, wins over the config file — so the site can be rebranded
+    // entirely from outside the binary AND outside the config file.
+    apply_web_env_overrides(&mut web_config);
+
+    let static_dir = web_config.static_dir.clone();
+
+    // Auto-detect a custom logo when `logo_url` isn't set: look for a
+    // `logo.*` / `favicon.*` image dropped into the static dir, in priority
+    // order. Lets operators just drop `public/logo.png` (or .svg/.jpg/...)
+    // without editing config.
+    if web_config.logo_url.trim().is_empty() {
+        if let Some(found) = detect_logo(&static_dir) {
+            tracing::info!(logo = %found, "auto-detected custom logo from static dir");
+            web_config.logo_url = found;
+        }
+    }
+
     let options = ScrapeOptions {
         follow_api: false,
         max_followed_apis: 0,
@@ -397,14 +420,58 @@ async fn handle_serve(bind: &str, cli: &Cli, sysspec: SysSpec) -> anyhow::Result
     };
     let engine = ScraperEngine::with_options(config, options)?;
     let codec = opaque::OpaqueCodec::from_env_or_random();
-    let state = api::ApiState::new(engine, codec, sysspec);
+    let state = api::ApiState::new(engine, codec, sysspec, web_config);
 
     let addr: std::net::SocketAddr = bind
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid bind '{}': {}", bind, e))?;
 
     log::banner(&addr, &sysspec);
-    server::run(state, addr).await
+    server::run(state, addr, &static_dir).await
+}
+
+/// Apply environment-variable overrides to the web/branding config.
+///
+/// Lets operators rebrand from outside both the binary and `config.toml`
+/// (e.g. `APIKU_SITE_NAME="MySite" apiku serve`). Empty / unset vars are
+/// ignored, so the config-file value remains.
+fn apply_web_env_overrides(web: &mut config::WebConfig) {
+    fn env_nonempty(key: &str) -> Option<String> {
+        std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+    }
+    if let Some(v) = env_nonempty("APIKU_SITE_NAME") {
+        web.site_name = v;
+    }
+    if let Some(v) = env_nonempty("APIKU_TAGLINE") {
+        web.tagline = v;
+    }
+    if let Some(v) = env_nonempty("APIKU_LOGO_URL") {
+        web.logo_url = v;
+    }
+    if let Some(v) = env_nonempty("APIKU_STATIC_DIR") {
+        web.static_dir = v;
+    }
+}
+
+/// Auto-detect a custom logo file in the static directory.
+///
+/// Looks for `logo.*` then `favicon.*` with common image extensions, in
+/// priority order, and returns its root path (e.g. `/logo.png`) so it can be
+/// used as `logo_url`. Returns `None` if nothing matches.
+fn detect_logo(static_dir: &str) -> Option<String> {
+    let stems = ["logo", "favicon"];
+    // SVG first (sharpest), then raster formats.
+    let exts = ["svg", "png", "webp", "jpg", "jpeg", "gif", "ico"];
+    for stem in stems {
+        for ext in exts {
+            let name = format!("{}.{}", stem, ext);
+            let path = std::path::Path::new(static_dir).join(&name);
+            if path.is_file() {
+                return Some(format!("/{}", name));
+            }
+        }
+    }
+    None
 }
 
 fn parse_clean_level(s: &str, flat: bool) -> CleanLevel {

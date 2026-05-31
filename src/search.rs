@@ -281,10 +281,27 @@ fn build_nhentai_cover(media_id: &str, ext: &str) -> String {
 }
 
 fn parse_cosplaytele_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
-    let parser = HtmlParser::parse(html);
-    let mut items = Vec::new();
+    // The Cosplaytele (Flatsome/WordPress) search page lists the *real* search
+    // results first, then several recommendation carousels ("Video Cosplayer",
+    // "Cosplay Nude", "Cosplay Ero", "Random post") rendered as
+    // `<div class="slider" data-flickity-options=...>`. Those carousels are
+    // NOT search matches, so we must cut them off before parsing — otherwise
+    // unrelated cosplayers (Arty Huang, etc.) leak into results.
+    //
+    // We slice the HTML at the first recommendation marker and only parse the
+    // portion above it.
+    let cut = ["section-title-container", "data-flickity-options"]
+        .iter()
+        .filter_map(|m| html.find(m))
+        .min()
+        .unwrap_or(html.len());
+    let main_html = &html[..cut];
 
-    for el in parser.select_all("article, .post-item, .col.post-item") {
+    let parser = HtmlParser::parse(main_html);
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for el in parser.select_all(".col.post-item, article, .post-item") {
         // Title
         let title_el = el
             .select(&scraper::Selector::parse("h2 a, h3 a, h4 a, h5 a, .post-title a").unwrap())
@@ -300,6 +317,9 @@ fn parse_cosplaytele_search(base_url: &str, html: &str) -> Vec<SearchResultItem>
             Some(u) => u,
             None => continue,
         };
+        if title.is_empty() || !seen.insert(url.clone()) {
+            continue;
+        }
 
         // Thumbnail
         let thumbnail = el
@@ -313,23 +333,21 @@ fn parse_cosplaytele_search(base_url: &str, html: &str) -> Vec<SearchResultItem>
                     .map(|s| resolve_url(base_url, s))
             });
 
-        // Snippet from cat-label
+        // Snippet from cat-label (categories + cosplayer name)
         let snippet = el
             .select(&scraper::Selector::parse(".cat-label").unwrap())
             .next()
             .map(|n| n.text().collect::<Vec<_>>().join(" ").trim().to_string());
 
-        if !title.is_empty() {
-            items.push(SearchResultItem {
-                source: "cosplaytele".to_string(),
-                title,
-                url,
-                thumbnail,
-                kind: Some("cosplay_post".to_string()),
-                snippet,
-                tags: Vec::new(),
-            });
-        }
+        items.push(SearchResultItem {
+            source: "cosplaytele".to_string(),
+            title,
+            url,
+            thumbnail,
+            kind: Some("cosplay_post".to_string()),
+            snippet,
+            tags: Vec::new(),
+        });
     }
     items
 }

@@ -53,3 +53,53 @@ Accept-Language = "en-US,en;q=0.9,id;q=0.8"
 # rate_limit_ms = 2000
 # [sites."mangadex.org".headers]
 # X-Custom-Header = "value"
+
+# ===========================================================================
+# Consumer web app branding & monetization (served at "/")
+# ===========================================================================
+# Everything in [web] is read at server start and injected into the SPA.
+# You can rebrand, add SEO/ad-network verification, and place ads WITHOUT
+# recompiling -- just edit this file and restart `apiku serve`.
+[web]
+# Site name shown in the header, drawer, browser tab title.
+# Ganti nilai ini untuk mengubah nama situs TANPA build ulang binary.
+# Bisa juga di-override lewat environment variable APIKU_SITE_NAME
+# (env menang atas nilai di sini), berguna untuk Docker/systemd.
+site_name = "apiku"
+
+# Tagline shown on the home hero banner. (env: APIKU_TAGLINE)
+tagline = "Streaming donghua, baca komik & novel, galeri cosplay - semua dalam satu platform."
+
+# Custom logo. Kosongkan untuk auto-deteksi / logo bawaan.
+#   - Auto-deteksi: cukup taruh file `logo.*` atau `favicon.*` di folder
+#     static_dir (public/), mis. public/logo.png -> otomatis dipakai.
+#   - Manual: set path/URL di sini (menang atas auto-deteksi), mis.
+#     logo_url = "/brand.png"  atau  "https://cdn.kamu/logo.svg"
+#   - Kosong & tak ada file logo -> pakai logo gradien bawaan.
+# Lihat public/README.md untuk panduan lengkap.
+logo_url = ""
+
+# Footer HTML. Empty -> a minimal "<site_name> (c) <year>" line.
+# Provide your own markup to fully control it (raw HTML allowed).
+footer_html = ""
+
+# Raw HTML injected into <head>. Use for search-engine / ad-network
+# verification meta tags and analytics/ad loader scripts. Example:
+#   head_html = '<meta name="google-site-verification" content="XXXX">'
+head_html = ""
+
+# Raw HTML injected just before </body> (deferred scripts).
+body_html = ""
+
+# Directory served at the site root for verification files, ads.txt,
+# sitemap.xml, robots.txt, favicons, and custom logos. Relative to the
+# working directory. A request to /google1234.html serves
+# <static_dir>/google1234.html. Missing files simply 404.
+static_dir = "public"
+
+# Named ad slots: raw HTML rendered at fixed positions in the web app.
+# Known slots: home, browse, detail, reader.
+[web.ads]
+# home   = '<ins class="adsbygoogle" ...></ins><script>(adsbygoogle=window.adsbygoogle||[]).push({})</script>'
+# browse = ''
+# reader = ''

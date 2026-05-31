@@ -148,11 +148,10 @@ impl NhentaiAdapter {
             })
             .map(|s| s.to_string());
 
-        let cover = json
-            .get("cover")
-            .and_then(|c| c.get("path"))
-            .and_then(|s| s.as_str())
-            .map(|p| build_cdn_url("i", media_id, p));
+        // The v2 gallery API nests imagery under `images.{cover,pages}` with a
+        // type code (`t`: j/p/g/w) rather than a literal path. Build the real
+        // CDN URLs from those codes.
+        let cover = cover_url_from_json(media_id, json);
         // Collect tags into category buckets
         let tags = json
             .get("tags")
@@ -183,48 +182,39 @@ impl NhentaiAdapter {
             }
         }
 
-        // Build pages from the gallery's `pages` array
-        let pages_raw = json
-            .get("pages")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let pages: Vec<PageImage> = pages_raw
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| {
-                let path = p.get("path").and_then(|v| v.as_str())?;
-                Some(PageImage {
-                    index: i + 1,
-                    url: build_cdn_url("i", media_id, path),
-                })
-            })
-            .collect();
+        // Build pages from the gallery's `images.pages` array. Each entry is
+        // `{ t: "j"|"p"|"g"|"w", w, h }`; the page filename is its 1-based
+        // index with the extension implied by `t`.
+        let pages = pages_from_json(media_id, json);
 
         // The gallery is rendered as a single-chapter series
         let chapter_url = format!("https://nhentai.net/g/{}/", id);
 
-        let synopsis = if !categories.is_empty() || !parodies.is_empty() {
-            let mut bits = Vec::new();
-            if !parodies.is_empty() {
-                bits.push(format!("Parodies: {}", parodies.join(", ")));
-            }
-            if !categories.is_empty() {
-                bits.push(format!("Category: {}", categories.join(", ")));
-            }
-            if !languages.is_empty() {
-                bits.push(format!("Language: {}", languages.join(", ")));
-            }
-            if let Some(n) = json.get("num_pages").and_then(|v| v.as_u64()) {
-                bits.push(format!("{} pages", n));
-            }
-            if let Some(n) = json.get("num_favorites").and_then(|v| v.as_u64()) {
-                bits.push(format!("{} favorites", n));
-            }
-            Some(bits.join(" - "))
-        } else {
-            None
-        };
+        // Instead of one cramped "a - b - c" synopsis line, surface every
+        // attribute as its own fact so the web app can render clean pills.
+        // Order matters: parody and category first (most useful for doujin),
+        // then language, the real tag genres, and finally the page / favourite
+        // counts. Duplicates are removed case-insensitively.
+        let num_pages = json
+            .get("num_pages")
+            .and_then(|v| v.as_u64())
+            .filter(|n| *n > 0)
+            .unwrap_or(pages.len() as u64);
+        let num_favorites = json.get("num_favorites").and_then(|v| v.as_u64());
+
+        let mut facts: Vec<String> = Vec::new();
+        facts.extend(parodies.iter().cloned());
+        facts.extend(categories.iter().cloned());
+        facts.extend(languages.iter().cloned());
+        facts.extend(genres.iter().cloned());
+        if num_pages > 0 {
+            facts.push(format!("{} halaman", num_pages));
+        }
+        if let Some(n) = num_favorites {
+            facts.push(format!("{} favorit", n));
+        }
+        let mut seen = std::collections::HashSet::new();
+        facts.retain(|s| seen.insert(s.to_lowercase()));
 
         let chapters = vec![ChapterInfo {
             number: 1.0,
@@ -245,8 +235,10 @@ impl NhentaiAdapter {
             } else {
                 Some(groups.join(", "))
             },
-            genres,
-            synopsis,
+            genres: facts,
+            // nhentai galleries have no real prose synopsis; the facts above
+            // carry all the meaningful metadata as pills.
+            synopsis: None,
             cover_image: cover,
             chapters,
             url: url.to_string(),
@@ -267,22 +259,7 @@ impl NhentaiAdapter {
             })
             .map(|s| s.to_string());
 
-        let pages_raw = json
-            .get("pages")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let pages: Vec<PageImage> = pages_raw
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| {
-                let path = p.get("path").and_then(|v| v.as_str())?;
-                Some(PageImage {
-                    index: i + 1,
-                    url: build_cdn_url("i", media_id, path),
-                })
-            })
-            .collect();
+        let pages = pages_from_json(media_id, json);
 
         Some(MangaChapter {
             series_title: title,
@@ -291,6 +268,38 @@ impl NhentaiAdapter {
             url: url.to_string(),
         })
     }
+}
+
+/// Build the full-size page list from a gallery JSON.
+///
+/// This mirror returns a top-level `pages[]` array where each entry carries a
+/// ready-to-use `path` like `galleries/<media_id>/1.webp` (full size) plus a
+/// `thumbnail` path. Full-size pages live on the `iN` CDN shard.
+fn pages_from_json(media_id: &str, json: &serde_json::Value) -> Vec<PageImage> {
+    let arr = json
+        .get("pages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    arr.iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let path = p.get("path").and_then(|v| v.as_str())?;
+            Some(PageImage {
+                index: i + 1,
+                url: build_cdn_url("i", media_id, path),
+            })
+        })
+        .collect()
+}
+
+/// Build the cover URL from a gallery JSON (`cover.path`).
+/// Covers are served from the `tN` thumbnail CDN shard.
+fn cover_url_from_json(media_id: &str, json: &serde_json::Value) -> Option<String> {
+    json.get("cover")
+        .and_then(|c| c.get("path"))
+        .and_then(|s| s.as_str())
+        .map(|p| build_cdn_url("t", media_id, p))
 }
 
 /// Build a full nhentai CDN URL from a path like `galleries/3957087/1.webp`.
@@ -410,5 +419,60 @@ mod tests {
             strip_duplicate_extension("galleries/1/cover.jpg"),
             "galleries/1/cover.jpg"
         );
+    }
+
+    #[test]
+    fn gallery_json_builds_cover_pages_and_facts() {
+        let json = serde_json::json!({
+            "id": 177013,
+            "media_id": "987654",
+            "title": { "english": "Sample Doujin" },
+            "num_pages": 3,
+            "num_favorites": 1234,
+            "cover": { "path": "galleries/987654/cover.webp", "width": 350, "height": 494 },
+            "pages": [
+                { "path": "galleries/987654/1.webp", "number": 1 },
+                { "path": "galleries/987654/2.webp", "number": 2 },
+                { "path": "galleries/987654/3.webp", "number": 3 }
+            ],
+            "tags": [
+                { "type": "parody",   "name": "genshin impact" },
+                { "type": "category", "name": "doujinshi" },
+                { "type": "language", "name": "english" },
+                { "type": "tag",      "name": "full color" },
+                { "type": "artist",   "name": "some artist" },
+                { "type": "group",    "name": "some group" }
+            ]
+        });
+
+        let s = NhentaiAdapter::parse_gallery_json("https://nhentai.net/g/177013/", &json)
+            .expect("series");
+        // Cover resolves to a thumbnail CDN url.
+        let cover = s.cover_image.expect("cover");
+        assert!(
+            cover.contains("nhentai.net/galleries/987654/cover.webp"),
+            "{cover}"
+        );
+        // Synopsis is no longer a cramped joined line.
+        assert!(s.synopsis.is_none());
+        // Facts (genres) carry the structured attributes as separate pills.
+        assert!(s.genres.iter().any(|g| g == "genshin impact"));
+        assert!(s.genres.iter().any(|g| g == "doujinshi"));
+        assert!(s.genres.iter().any(|g| g == "full color"));
+        assert!(s.genres.iter().any(|g| g == "3 halaman"));
+        assert!(s.genres.iter().any(|g| g == "1234 favorit"));
+        assert_eq!(s.author.as_deref(), Some("some artist"));
+        assert_eq!(s.artist.as_deref(), Some("some group"));
+
+        // Chapter (pages) parsing yields 3 sharded full-size page URLs.
+        let c = NhentaiAdapter::parse_gallery_as_chapter("https://nhentai.net/g/177013/", &json)
+            .expect("chapter");
+        assert_eq!(c.pages.len(), 3);
+        assert!(c.pages[0].url.ends_with("galleries/987654/1.webp"));
+        assert!(c.pages[1].url.ends_with("galleries/987654/2.webp"));
+        assert!(c.pages[2].url.ends_with("galleries/987654/3.webp"));
+        // Full-size pages use the `i` CDN shard, cover uses the `t` shard.
+        assert!(c.pages[0].url.contains("//i"));
+        assert!(cover.contains("//t"));
     }
 }

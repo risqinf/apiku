@@ -68,6 +68,8 @@ pub struct ApiState {
     pub search_cache: Cache<String, Arc<SearchEnvelopeData>>,
     pub started_at: Instant,
     pub sysspec: crate::sysspec::SysSpec,
+    /// Consumer web app branding / customization.
+    pub web: Arc<crate::config::WebConfig>,
 }
 
 impl ApiState {
@@ -75,6 +77,7 @@ impl ApiState {
         engine: ScraperEngine,
         codec: OpaqueCodec,
         sysspec: crate::sysspec::SysSpec,
+        web: crate::config::WebConfig,
     ) -> Self {
         let cache = Cache::builder()
             .time_to_live(Duration::from_secs(600))
@@ -91,6 +94,7 @@ impl ApiState {
             search_cache,
             started_at: Instant::now(),
             sysspec,
+            web: Arc::new(web),
         }
     }
 }
@@ -573,7 +577,12 @@ pub fn api_endpoint_docs() -> Vec<EndpointDoc> {
         EndpointDoc {
             method: "GET",
             path: "/api/v1/cosplay/{id}",
-            description: "Cosplay post (gallery + downloads)",
+            description: "Cosplay post (gallery + downloads + resolved video)",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/cosplay-video?p={payload}&s={signature}",
+            description: "Resolve a Cosplaytele embed into a playable HLS stream URL",
         },
         EndpointDoc {
             method: "GET",
@@ -599,6 +608,11 @@ pub fn api_endpoint_docs() -> Vec<EndpointDoc> {
             method: "GET",
             path: "/img?p={payload}&s={signature}",
             description: "HMAC-signed image proxy that hides upstream CDNs",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/hls?p={payload}&s={signature}",
+            description: "HLS playlist proxy (segments stream direct from CDN to client)",
         },
     ]
 }
@@ -783,7 +797,50 @@ async fn run_single_search(
         Some(u) => u,
         None => return Err(format!("no search URL for source {:?}", source)),
     };
-    fetch_and_parse_html_listing(state, source, &url).await
+    let items = fetch_and_parse_html_listing(state, source, &url).await?;
+    // Cosplaytele's WordPress search is loose and the page also embeds
+    // recommendation carousels. We already strip the carousels during parsing;
+    // here we additionally keep only results that actually match the query
+    // (every query word must appear in the title or the cat-label snippet,
+    // which carries the cosplayer name). This gives high-precision results
+    // like "xiaoyaoyaoyao" -> only xiaoyaoyaoyao posts.
+    if matches!(source, SearchSource::Cosplaytele) {
+        return Ok(filter_relevant(items, query));
+    }
+    Ok(items)
+}
+
+/// Keep only items whose title/snippet contain *all* whitespace-delimited
+/// query terms (case-insensitive). Falls back to the unfiltered list if the
+/// filter would remove everything (so a slightly-off match still shows
+/// something rather than an empty page).
+fn filter_relevant(items: Vec<SearchResultItem>, query: &str) -> Vec<SearchResultItem> {
+    let terms: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect();
+    if terms.is_empty() {
+        return items;
+    }
+    let filtered: Vec<SearchResultItem> = items
+        .iter()
+        .filter(|it| {
+            let hay = format!(
+                "{} {}",
+                it.title.to_lowercase(),
+                it.snippet.as_deref().unwrap_or("").to_lowercase()
+            );
+            terms.iter().all(|t| hay.contains(t))
+        })
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        items
+    } else {
+        filtered
+    }
 }
 
 /// Fetch an HTML listing page and parse it. If the parse yields zero items
@@ -1448,7 +1505,7 @@ fn donghua_series_to_dto(
     size: Option<u32>,
 ) -> DonghuaSeriesDto {
     let total = s.episodes.len();
-    let size = size.unwrap_or(50).clamp(1, 200) as usize;
+    let size = size.unwrap_or(50).clamp(1, 5000) as usize;
     let p = page.max(1) as usize;
     let start = (p - 1) * size;
     let end = (start + size).min(total);
@@ -1641,7 +1698,21 @@ fn cosplay_to_dto(state: &ApiState, c: &CosplayPost, id: &str) -> CosplayPostDto
         published_at: c.published_at.clone(),
         cover: proxy_opt(state, c.cover_image.as_deref()),
         images: c.images.iter().map(|u| proxy_url(state, u)).collect(),
-        videos: c.videos.iter().map(|u| proxy_url(state, u)).collect(),
+        // Videos: cossora.stream embeds are turned into a signed resolver URL
+        // (`/api/v1/cosplay/video?...`) the frontend resolves to an HLS
+        // stream and plays with hls.js. Direct files / other embeds pass
+        // through raw.
+        videos: c
+            .videos
+            .iter()
+            .map(|u| {
+                if crate::cossora::is_cossora_embed(u) {
+                    signed_cosplay_video_url(state, u)
+                } else {
+                    u.clone()
+                }
+            })
+            .collect(),
         downloads: c
             .download_links
             .iter()
@@ -1652,6 +1723,422 @@ fn cosplay_to_dto(state: &ApiState, c: &CosplayPost, id: &str) -> CosplayPostDto
             .collect(),
         unzip_password: c.unzip_password.clone(),
     }
+}
+
+// ---- Cosplay video (cossora.stream embed) ---------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CosplayVideoQuery {
+    /// Signed payload (base64 of the embed URL).
+    pub p: String,
+    /// HMAC signature of `p`.
+    pub s: String,
+}
+
+/// Resolve a Cosplaytele video embed into a playable HLS stream.
+///
+/// Cosplaytele videos come from `cossora.stream/embed/<id>`, which (a) only
+/// serves content when the Referer is `cosplaytele.com`, so a plain browser
+/// iframe gets "Unknown Error xD", and (b) AES-encrypts the real `.m3u8` URL
+/// in the page. We fetch the embed with the right Referer, decrypt the URL
+/// server-side, then hand back a `/hls` proxy URL the browser can play with
+/// hls.js. The playlist token is locked to our IP, so it must be proxied.
+pub async fn cosplay_video(
+    State(state): State<ApiState>,
+    Query(q): Query<CosplayVideoQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    if !state.codec.verify_image(&q.p, &q.s) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "bad_signature",
+            "Video resolver signature is invalid",
+            started,
+            &rid,
+        );
+    }
+    let embed_url = match decode_signed_url(&q.p) {
+        Some(u) => u,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Embed payload is not valid",
+                started,
+                &rid,
+            )
+        }
+    };
+    if !crate::cossora::is_cossora_embed(&embed_url) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "unsupported_embed",
+            "Embed host is not supported",
+            started,
+            &rid,
+        );
+    }
+
+    // Fetch the embed page (cached) with a cosplaytele Referer.
+    let html = match fetch_text_with_referer(&state, &embed_url, "https://cosplaytele.com/").await {
+        Ok(h) => h,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "embed_fetch_failed",
+                e,
+                started,
+                &rid,
+            )
+        }
+    };
+    let master = match crate::cossora::resolve_master_from_html(&html) {
+        Some(m) => m,
+        None => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "resolve_failed",
+                "Could not resolve a playable stream from the embed",
+                started,
+                &rid,
+            )
+        }
+    };
+
+    // Hand back a proxied HLS URL (playlist is IP-locked to us).
+    let hls = signed_hls_url(&state, &master);
+    ok(
+        StatusCode::OK,
+        serde_json::json!({ "type": "hls", "url": hls }),
+        started,
+        false,
+        &rid,
+    )
+}
+
+/// Proxy an HLS playlist or segment for the cossora stream.
+///
+/// `.m3u8` playlists are rewritten so every nested playlist / segment URL is
+/// re-signed and routed back through this proxy (keeping the IP that fetches
+/// the token-locked playlists equal to ours). Binary segments are streamed
+/// through unchanged.
+pub async fn hls_proxy(
+    State(state): State<ApiState>,
+    Query(q): Query<CosplayVideoQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    if !state.codec.verify_image(&q.p, &q.s) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "bad_signature",
+            "HLS proxy signature is invalid",
+            started,
+            &rid,
+        );
+    }
+    let url = match decode_signed_url(&q.p) {
+        Some(u) => u,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "HLS payload is not valid",
+                started,
+                &rid,
+            )
+        }
+    };
+    if !is_allowed_hls_host(&url) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "host_not_allowed",
+            "HLS proxy will not fetch this host",
+            started,
+            &rid,
+        );
+    }
+
+    let fp = BrowserFingerprint::for_url(&url);
+    let mut hdrs = fp.as_header_map();
+    hdrs.insert("Referer".to_string(), "https://cossora.stream/".to_string());
+    // Let reqwest manage compression so playlists are auto-decompressed.
+    hdrs.remove("Accept-Encoding");
+    let headers = match state
+        .engine
+        .pipeline()
+        .build_headers(&url, None, Some(&hdrs))
+    {
+        Ok(h) => h,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "header_build",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    let resp = match state
+        .engine
+        .client()
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if !resp.status().is_success() {
+        return err(
+            StatusCode::BAD_GATEWAY,
+            "upstream_status",
+            format!("Upstream returned {}", resp.status()),
+            started,
+            &rid,
+        );
+    }
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let is_playlist = url.contains(".m3u8")
+        || content_type.contains("mpegurl")
+        || content_type.contains("vnd.apple");
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "upstream_body",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+
+    if is_playlist {
+        // Rewrite URLs in the playlist to route back through this proxy.
+        let text = String::from_utf8_lossy(&bytes);
+        let rewritten = rewrite_m3u8(&state, &text, &url);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/vnd.apple.mpegurl"),
+        );
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        return (StatusCode::OK, headers, rewritten).into_response();
+    }
+
+    // Binary segment / key: stream through with a long cache.
+    let mut headers = HeaderMap::new();
+    if let Ok(ct) = HeaderValue::from_str(&content_type) {
+        headers.insert(header::CONTENT_TYPE, ct);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    (StatusCode::OK, headers, bytes).into_response()
+}
+
+/// Rewrite URLs in an m3u8 playlist.
+///
+/// Bandwidth-saving policy: only **nested playlists** (`.m3u8`) are routed
+/// back through our `/hls` proxy — they are tiny, token-locked to our IP, and
+/// served without CORS, so the browser can't fetch them directly. Heavy media
+/// **segments** (`.ts`/`.m4s`/`.aac`) and encryption keys are rewritten to
+/// their **absolute** CDN URLs and fetched **directly by the client** (the
+/// cossora CDN serves them with `Access-Control-Allow-Origin: *` and no
+/// token). This keeps all the large traffic client<->CDN, off our server.
+fn rewrite_m3u8(state: &ApiState, text: &str, base: &str) -> String {
+    let base_url = url::Url::parse(base).ok();
+    let absolutize = |raw: &str| -> Option<String> {
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            Some(raw.to_string())
+        } else {
+            Some(base_url.as_ref()?.join(raw).ok()?.to_string())
+        }
+    };
+    // A resource is a (sub)playlist if it points at an .m3u8.
+    let is_playlist_ref = |abs: &str| -> bool {
+        let path = abs.split(['?', '#']).next().unwrap_or(abs);
+        path.to_lowercase().ends_with(".m3u8")
+    };
+    // Playlists -> proxied + signed; everything else -> direct absolute URL.
+    let resolve = |raw: &str| -> Option<String> {
+        let abs = absolutize(raw)?;
+        if is_playlist_ref(&abs) {
+            Some(signed_hls_url(state, &abs))
+        } else {
+            Some(abs)
+        }
+    };
+
+    let mut out = String::with_capacity(text.len() + 256);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            // Rewrite URI="..." attributes (keys, maps, media renditions).
+            // Keys/maps resolve to direct CDN URLs; nested media playlists are
+            // proxied. `resolve` handles that distinction.
+            if let Some(rewritten) = rewrite_uri_attr(line, &resolve) {
+                out.push_str(&rewritten);
+            } else {
+                out.push_str(line);
+            }
+            out.push('\n');
+            continue;
+        }
+        // Plain resource line (nested playlist or segment).
+        match resolve(trimmed) {
+            Some(u) => out.push_str(&u),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Rewrite a `URI="..."` attribute inside an m3u8 tag line, if present.
+fn rewrite_uri_attr<F>(line: &str, resolve: &F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let key = "URI=\"";
+    let start = line.find(key)? + key.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    let raw = &rest[..end];
+    let new = resolve(raw)?;
+    Some(format!("{}{}{}", &line[..start], new, &rest[end..]))
+}
+
+/// Allowlist of hosts the HLS proxy will fetch from.
+fn is_allowed_hls_host(url: &str) -> bool {
+    let host = match url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_lowercase))
+    {
+        Some(h) => h,
+        None => return false,
+    };
+    host == "cossora.stream" || host.ends_with(".cossora.stream")
+}
+
+/// Build a signed `/hls?p=&s=` proxy URL for an absolute media URL.
+fn signed_hls_url(state: &ApiState, raw: &str) -> String {
+    let payload = URL_SAFE_NO_PAD.encode(raw.as_bytes());
+    let sig = state.codec.sign_image(&payload);
+    format!("/hls?p={}&s={}", payload, sig)
+}
+
+/// Build a signed `/api/v1/cosplay-video?p=&s=` resolver URL for an embed.
+pub fn signed_cosplay_video_url(state: &ApiState, embed_url: &str) -> String {
+    let payload = URL_SAFE_NO_PAD.encode(embed_url.as_bytes());
+    let sig = state.codec.sign_image(&payload);
+    format!("/api/v1/cosplay-video?p={}&s={}", payload, sig)
+}
+
+/// Decode a base64url payload (as produced by the signers) back to a string.
+fn decode_signed_url(payload: &str) -> Option<String> {
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Fetch a URL as text using a browser fingerprint and a specific Referer,
+/// with single-flight caching keyed on the URL.
+async fn fetch_text_with_referer(
+    state: &ApiState,
+    url: &str,
+    referer: &str,
+) -> Result<String, String> {
+    let key = format!("text:{}", url);
+    if let Some(arc) = state.cache.get(&key).await {
+        if let Some(ContentModel::JsonApi(j)) = &arc.content {
+            if let Some(s) = j.data.as_str() {
+                return Ok(s.to_string());
+            }
+        }
+    }
+
+    let fp = BrowserFingerprint::for_url(url);
+    let mut hdrs = fp.as_header_map();
+    hdrs.insert("Referer".to_string(), referer.to_string());
+    // Drop the manual Accept-Encoding so reqwest manages compression and
+    // auto-decompresses the body. If we send our own Accept-Encoding, reqwest
+    // hands back the raw (gzip/br/zstd) bytes and `text()` yields garbage —
+    // which made some cossora embeds fail to parse ("resolve_failed").
+    hdrs.remove("Accept-Encoding");
+    let headers = state
+        .engine
+        .pipeline()
+        .build_headers(url, None, Some(&hdrs))
+        .map_err(|e| e.to_string())?;
+    let resp = state
+        .engine
+        .client()
+        .get(url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("upstream returned {}", resp.status()));
+    }
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+
+    // Cache the HTML body (short TTL via the scrape cache) wrapped as JsonApi.
+    let arc = Arc::new(ScrapeResult {
+        url: url.to_string(),
+        success: true,
+        adapter_used: Some("cossora".to_string()),
+        content: Some(ContentModel::JsonApi(crate::models::JsonApiResponse {
+            url: url.to_string(),
+            status_code: 200,
+            content_type: Some("text/html".to_string()),
+            data: serde_json::Value::String(text.clone()),
+        })),
+        deep: None,
+        error: None,
+        elapsed_ms: 0,
+    });
+    state.cache.insert(key, arc).await;
+    Ok(text)
 }
 
 // ---- Novel (novelid.org) -------------------------------------------------
@@ -2432,6 +2919,9 @@ fn referer_for_host(host: &str) -> String {
     if h.contains("cosplaytele.com") {
         return "https://cosplaytele.com/".to_string();
     }
+    if h.contains("novelid.org") {
+        return "https://novelid.org/".to_string();
+    }
     if h.contains("mangaball.net")
         || h.contains("poke-black-and-white.net")
         || h.contains("red-and-blue.net")
@@ -2485,6 +2975,10 @@ fn is_allowed_image_host(url: &str) -> bool {
         return true;
     }
     if host.ends_with(".nhentai.net") {
+        return true;
+    }
+    // NovelID (covers are hosted on the main domain, sometimes via wp.com)
+    if host == "novelid.org" || host.ends_with(".novelid.org") {
         return true;
     }
 

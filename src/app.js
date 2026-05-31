@@ -7,6 +7,84 @@
   const app = document.getElementById("app");
   const CHAPTER_SIZE = 60;
 
+  // ---- Branding (injected by server via window.__BRAND) -------------------
+  const BRAND = Object.assign(
+    { name: "apiku", tagline: "Streaming donghua, baca komik & novel, galeri cosplay - semua dalam satu platform.", logo: "", footer: "", ads: {} },
+    (window.__BRAND || {})
+  );
+  // tiny escapers usable before `h` is defined
+  function escHtml(s){ return (s==null?"":String(s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function escAttr(s){ return escHtml(s).replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
+  // Logo markup: custom image if configured, otherwise the gradient mark.
+  function brandLogo(){
+    return BRAND.logo
+      ? `<span class="logo img"><img src="${escAttr(BRAND.logo)}" alt=""></span>`
+      : `<span class="logo">&#128250;</span>`;
+  }
+  function brandMark(){ return `${brandLogo()}<b>${escHtml(BRAND.name)}</b>`; }
+  // Ad slot HTML for a named position (empty string when unconfigured).
+  function adSlot(name){
+    const html = BRAND.ads && BRAND.ads[name];
+    return html ? `<div class="ad-slot" data-slot="${escAttr(name)}">${html}</div>` : "";
+  }
+
+  // ---- HLS playback (cosplay videos) --------------------------------------
+  // Lazily load hls.js from a CDN once, then reuse.
+  let _hlsLoading = null;
+  function loadHlsJs(){
+    if(window.Hls) return Promise.resolve(window.Hls);
+    if(_hlsLoading) return _hlsLoading;
+    _hlsLoading = new Promise((resolve, reject)=>{
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js";
+      s.onload = ()=>resolve(window.Hls);
+      s.onerror = ()=>reject(new Error("gagal memuat pemutar"));
+      document.head.appendChild(s);
+    });
+    return _hlsLoading;
+  }
+
+  // Resolve a signed cosplay-video URL -> HLS stream, then attach to <video>.
+  async function attachHls(wrap){
+    const resolveUrl = wrap.dataset.resolve;
+    const idx = wrap.dataset.idx;
+    const video = wrap.querySelector("video");
+    const state = document.getElementById(`hls-state-${idx}`);
+    const fail = (msg, src)=>{
+      if(state) state.innerHTML = `<div class="hls-err">${escHtml(msg)}${src?`<br><a class="btn sm" href="${escAttr(src)}" target="_blank" rel="noopener noreferrer">Buka langsung</a>`:""}</div>`;
+    };
+    try{
+      // resolveUrl is /api/v1/cosplay-video?... ; strip the /api/v1 prefix for api()
+      const rel = resolveUrl.replace(/^.*\/api\/v1/, "");
+      const res = await api(rel);
+      const src = res && res.url;
+      if(!src){ fail("Stream tidak ditemukan"); return; }
+      if(video.canPlayType("application/vnd.apple.mpegurl")){
+        // Safari plays HLS natively.
+        video.src = src;
+        if(state) state.remove();
+        return;
+      }
+      const Hls = await loadHlsJs();
+      if(Hls && Hls.isSupported()){
+        const hls = new Hls({ maxBufferLength: 30 });
+        hls.loadSource(src);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, ()=>{ if(state) state.remove(); });
+        hls.on(Hls.Events.ERROR, (_e, d)=>{ if(d && d.fatal) fail("Gagal memutar video", src); });
+      } else {
+        video.src = src;
+        if(state) state.remove();
+      }
+    }catch(e){ fail(e.message || "Gagal memuat video"); }
+  }
+  // Footer: operator-configurable. Empty -> minimal "name (c) year".
+  function footerHtml(){
+    if(BRAND.footer && BRAND.footer.trim()) return BRAND.footer;
+    const year = new Date().getFullYear();
+    return `<span>${escHtml(BRAND.name)} &copy; ${year}</span> &middot; <a href="#/docs">API</a> &middot; dev <a href="https://github.com/risqinf" target="_blank" rel="noopener">@risqinf</a>`;
+  }
+
   // ---- SVG icons ----------------------------------------------------------
   const I = {
     home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>',
@@ -25,16 +103,19 @@
     play:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
     book:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M6 17h13"/></svg>',
     arrow:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+    expand:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>',
+    compress:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/></svg>',
   };
 
   // ---- Provider config ---------------------------------------------------
   const PROVIDERS = {
     donghua: { label: "Donghua", api: "anichin",     kind: "donghua", adult: false, icon: I.donghua },
-    manga:   { label: "Manga",   api: "mangaball",   kind: "manga",   adult: false, icon: I.manga },
+    manga:   { label: "Komik",   api: "mangaball",   kind: "manga",   adult: false, icon: I.manga },
     novel:   { label: "Novel",   api: "novelid",     kind: "novel",   adult: false, icon: I.novel },
     cosplay: { label: "Cosplay", api: "cosplaytele", kind: "cosplay", adult: true,  icon: I.cosplay },
     doujin:  { label: "Doujin",  api: "nhentai",     kind: "doujin",  adult: true,  icon: I.doujin },
   };
+  const EPISODE_SIZE = 5000; // donghua: fetch the whole episode list at once
 
   const FEEDS = {
     anichin:     [["home","Terbaru"],["popular","Populer"],["rating","Rating"],["title","A-Z"]],
@@ -65,6 +146,42 @@
   async function api(path){ const r=await fetch(API+path); const j=await r.json(); if(!j.ok) throw new Error(j.error?`${j.error.code}: ${j.error.message}`:"request failed"); return j.data; }
   async function apiRaw(method, rel){ const url=API+rel; const t0=performance.now(); const r=await fetch(url,{method}); const text=await r.text(); let json; try{json=JSON.parse(text);}catch{json=text;} return {status:r.status, ms:Math.round(performance.now()-t0), json}; }
 
+  // ---- Client-side prefetch cache -----------------------------------------
+  // A small in-memory cache + an idle prefetch queue. We use it to warm the
+  // detail/episode/chapter that the user is most likely to open next so the
+  // navigation feels instant. Requests are coalesced (single-flight).
+  const _cache = new Map();      // path -> resolved data
+  const _inflight = new Map();   // path -> Promise
+  const _idleQ = [];
+  let _idleRunning = false;
+  const _idle = (cb)=> (window.requestIdleCallback ? requestIdleCallback(cb,{timeout:1500}) : setTimeout(cb,120));
+
+  async function apiCached(path){
+    if(_cache.has(path)) return _cache.get(path);
+    if(_inflight.has(path)) return _inflight.get(path);
+    const p = api(path).then(d=>{ _cache.set(path, d); _inflight.delete(path); return d; })
+                       .catch(e=>{ _inflight.delete(path); throw e; });
+    _inflight.set(path, p);
+    return p;
+  }
+  function _drainIdle(){
+    if(_idleRunning) return; _idleRunning = true;
+    const step = ()=>{
+      const path = _idleQ.shift();
+      if(!path){ _idleRunning = false; return; }
+      if(_cache.has(path) || _inflight.has(path)){ _idle(step); return; }
+      apiCached(path).catch(()=>{}).finally(()=> _idle(step));
+    };
+    _idle(step);
+  }
+  // Queue one or more API paths to warm in the background (deduped).
+  function prefetch(paths){
+    (Array.isArray(paths)?paths:[paths]).forEach(p=>{
+      if(p && !_cache.has(p) && !_inflight.has(p) && !_idleQ.includes(p)) _idleQ.push(p);
+    });
+    _drainIdle();
+  }
+
   const go = (hash) => { location.hash = hash; };
   const viewEl = () => document.getElementById("view");
   const setView = (html) => { const v=viewEl(); if(v) v.innerHTML=html; };
@@ -75,26 +192,77 @@
     if(!url) return `<div class="ph">${h(alt||"no image")}</div>`;
     return `<img loading="lazy" referrerpolicy="no-referrer" src="${h(url)}" alt="${h(alt||"")}" onerror="this.parentNode.innerHTML='<div class=ph>no image</div>'">`;
   }
+  // Natural-ratio image: lets the browser size by the real image dimensions
+  // (used for cosplay/doujin galleries where not everything is 2:3).
+  function imgNatural(url, alt){
+    if(!url) return `<div class="ph">${h(alt||"no image")}</div>`;
+    return `<img class="nat" loading="lazy" referrerpolicy="no-referrer" src="${h(url)}" alt="${h(alt||"")}" onerror="this.style.display='none'">`;
+  }
 
   // ---- Shell --------------------------------------------------------------
   function navLinks(){
     const items = [
-      ["home", "#/", "Home", I.home],
-      ["donghua", "#/browse/donghua", "Donghua", I.donghua],
-      ["manga", "#/browse/manga", "Manga", I.manga],
-      ["novel", "#/browse/novel", "Novel", I.novel],
+      ["home", "#/", "Home", I.home, false],
+      ["donghua", "#/browse/donghua", "Donghua", I.donghua, false],
+      ["manga", "#/browse/manga", "Komik", I.manga, false],
+      ["novel", "#/browse/novel", "Novel", I.novel, false],
     ];
     if (adultOn()) {
-      items.push(["cosplay", "#/browse/cosplay", "Cosplay", I.cosplay]);
-      items.push(["doujin", "#/browse/doujin", "Doujin", I.doujin]);
+      items.push(["cosplay", "#/browse/cosplay", "Cosplay", I.cosplay, true]);
+      items.push(["doujin", "#/browse/doujin", "Doujin", I.doujin, true]);
     }
-    items.push(["docs", "#/docs", "API Docs", I.docs]);
-    items.push(["explorer", "#/explorer", "Explorer", I.explorer]);
+    items.push(["docs", "#/docs", "API Docs", I.docs, false]);
+    items.push(["explorer", "#/explorer", "Explorer", I.explorer, false]);
     return items;
+  }
+  // Render a nav link; adult items get a red "18+" badge.
+  function navItem(s, href, label, ico, adult, seg){
+    const badge = adult ? `<span class="nv18">18+</span>` : "";
+    return `<a data-seg="${s}" href="${href}" class="${s===seg?"active":""}">${ico}<span>${label}</span>${badge}</a>`;
+  }
+
+  // Map any route to the nav item that should appear "active".
+  function activeNavSeg(){
+    const parts = location.hash.replace(/^#\//,"").split("/").map(decodeURIComponent);
+    const seg = parts[0] || "home";
+    switch(seg){
+      case "": case "home": return "home";
+      case "browse": return parts[1] || "";
+      case "detail": return parts[1] || "";          // kind: donghua/manga/novel/cosplay/doujin
+      case "watch":  return "donghua";
+      case "read":   return parts[1] === "nhentai" ? "doujin" : (parts[1] || "");
+      case "docs":   return "docs";
+      case "explorer": return "explorer";
+      default: return seg;                            // search etc -> nothing highlighted
+    }
+  }
+
+  // Age-verification modal (replaces the bare confirm() dialog).
+  function showAgeModal(onYes){
+    const wrap = document.createElement("div");
+    wrap.className = "modal-scrim";
+    wrap.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ageTitle">
+        <div class="modal-ico">${I.doujin}</div>
+        <h3 id="ageTitle">Konten Dewasa &middot; 18+</h3>
+        <p>Bagian <b>Cosplay</b> dan <b>Doujin</b> berisi materi khusus dewasa. Dengan melanjutkan, kamu menyatakan berusia minimal 18 tahun dan setuju menampilkan konten ini.</p>
+        <div class="modal-actions">
+          <button class="btn" data-act="no">Batal</button>
+          <button class="btn primary" data-act="yes">Ya, saya 18+</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    requestAnimationFrame(()=>wrap.classList.add("open"));
+    const close = ()=>{ wrap.classList.remove("open"); setTimeout(()=>wrap.remove(),200); document.removeEventListener("keydown", esc); };
+    function esc(e){ if(e.key==="Escape") close(); }
+    wrap.addEventListener("click",(e)=>{ if(e.target===wrap) close(); });
+    wrap.querySelector('[data-act="no"]').onclick = close;
+    wrap.querySelector('[data-act="yes"]').onclick = ()=>{ close(); onYes(); };
+    document.addEventListener("keydown", esc);
   }
 
   function shell(inner){
-    const seg = (location.hash.replace(/^#\//,"").split("/")[0]) || "home";
+    const seg = activeNavSeg();
     const links = navLinks();
     const themeIco = store.theme === "dark" ? I.sun : I.moon;
 
@@ -102,24 +270,30 @@
       <div class="drawer-scrim" id="scrim"></div>
       <aside class="drawer" id="drawer">
         <div class="dhead">
-          <span class="brand"><span class="logo">&#128250;</span><b>apiku</b></span>
+          <span class="brand">${brandMark()}</span>
           <button class="icon-btn" id="drawerClose">${I.close}</button>
         </div>
         <nav>
-          ${links.map(([s,href,label,ico])=>`<a data-seg="${s}" href="${href}" class="${s===seg?"active":""}">${ico}<span>${label}</span></a>`).join("")}
+          ${links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
         </nav>
         <div class="dsep"></div>
         <div class="drow">
-          <button class="icon-btn ${adultOn()?"on":""}" id="adultBtnD">18+ ${adultOn()?"ON":"OFF"}</button>
-          <button class="icon-btn" id="themeBtnD">${themeIco}<span>Tema</span></button>
+          <button class="switch ${adultOn()?"on":""}" id="adultBtnD" role="switch" aria-checked="${adultOn()}">
+            <span class="switch-label"><span class="b18">18+</span> Konten dewasa</span>
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </button>
+          <button class="switch ${store.theme==="dark"?"on":""}" id="themeBtnD" role="switch" aria-checked="${store.theme==="dark"}">
+            <span class="switch-label">${themeIco}<span>Mode gelap</span></span>
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </button>
         </div>
       </aside>
 
       <header class="hdr">
         <button class="icon-btn hamburger" id="hamburger">${I.menu}</button>
-        <a class="brand" href="#/"><span class="logo">&#128250;</span><b>apiku</b></a>
+        <a class="brand" href="#/">${brandMark()}</a>
         <nav class="desktop">
-          ${links.map(([s,href,label,ico])=>`<a data-seg="${s}" href="${href}" class="${s===seg?"active":""}">${ico}<span>${label}</span></a>`).join("")}
+          ${links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
         </nav>
         <div class="spacer"></div>
         <form class="searchbox" id="searchform">
@@ -130,12 +304,7 @@
         <button class="icon-btn" id="themeBtn" title="Ganti tema">${themeIco}</button>
       </header>
       <main id="view">${inner}</main>
-      <footer>
-        Ditenagai <a href="https://github.com/risqinf/apiku" target="_blank" rel="noopener">apiku</a> &middot;
-        <a href="#/docs">API Docs</a> &middot; <a href="#/explorer">Explorer</a> &middot;
-        <a href="/tester">Dev console</a><br>
-        Konten berasal dari sumber pihak ketiga.
-      </footer>`;
+      <footer>${footerHtml()}</footer>`;
 
     // search
     const form = document.getElementById("searchform");
@@ -144,21 +313,49 @@
     const m = location.hash.match(/^#\/search\/([^/]+)/);
     if (m) input.value = decodeURIComponent(m[1]);
 
-    // theme
-    const toggleTheme = ()=>{ store.theme = store.theme==="dark"?"light":"dark"; applyTheme(); window.__apiku.router(); };
-    document.getElementById("themeBtn").onclick = toggleTheme;
-    document.getElementById("themeBtnD").onclick = toggleTheme;
-
-    // adult
-    const toggleAdult = ()=>{
-      if(!adultOn()){ if(!confirm("Aktifkan konten 18+? Hanya untuk pengguna dewasa (18+).")) return; }
-      store.adult = !store.adult;
-      const sub = (location.hash.replace(/^#\//,"").split("/")[1]) || "";
-      if(!adultOn() && (sub==="cosplay"||sub==="doujin")){ go("#/"); return; }
-      window.__apiku.router();
+    // theme — switch live (no full re-render, so it doesn't flicker)
+    const themeBtn = document.getElementById("themeBtn");
+    const themeBtnD = document.getElementById("themeBtnD");
+    const toggleTheme = ()=>{
+      store.theme = store.theme==="dark"?"light":"dark";
+      applyTheme();
+      // update header icon button
+      if(themeBtn) themeBtn.innerHTML = store.theme==="dark" ? I.sun : I.moon;
+      // update drawer switch state + icon
+      if(themeBtnD){
+        themeBtnD.classList.toggle("on", store.theme==="dark");
+        themeBtnD.setAttribute("aria-checked", String(store.theme==="dark"));
+        const lab = themeBtnD.querySelector(".switch-label");
+        if(lab) lab.innerHTML = `${store.theme==="dark"?I.sun:I.moon}<span>Mode gelap</span>`;
+      }
     };
-    document.getElementById("adultBtn").onclick = toggleAdult;
-    document.getElementById("adultBtnD").onclick = toggleAdult;
+    if(themeBtn) themeBtn.onclick = toggleTheme;
+    if(themeBtnD) themeBtnD.onclick = toggleTheme;
+
+    // adult — animate the switch first, then re-render after the transition
+    const adultBtn = document.getElementById("adultBtn");
+    const adultBtnD = document.getElementById("adultBtnD");
+    const enableAdult = ()=>{
+      store.adult = true;
+      if(adultBtnD){ adultBtnD.classList.add("on"); adultBtnD.setAttribute("aria-checked","true"); }
+      if(adultBtn) adultBtn.classList.add("on");
+      setTimeout(()=>window.__apiku.router(), 200);
+    };
+    const toggleAdult = ()=>{
+      if(!adultOn()){ showAgeModal(enableAdult); return; }
+      // turning OFF: animate switch off first
+      store.adult = false;
+      if(adultBtnD){ adultBtnD.classList.remove("on"); adultBtnD.setAttribute("aria-checked","false"); }
+      if(adultBtn) adultBtn.classList.remove("on");
+      const parts = location.hash.replace(/^#\//,"").split("/").map(decodeURIComponent);
+      const inAdult = (parts[0]==="browse" && (parts[1]==="cosplay"||parts[1]==="doujin"))
+        || (parts[0]==="detail" && (parts[1]==="cosplay"||parts[1]==="doujin"))
+        || (parts[0]==="read" && parts[1]==="nhentai");
+      if(inAdult){ setTimeout(()=>go("#/"), 200); return; }
+      setTimeout(()=>window.__apiku.router(), 200);
+    };
+    if(adultBtn) adultBtn.onclick = toggleAdult;
+    if(adultBtnD) adultBtnD.onclick = toggleAdult;
 
     // drawer
     const drawer = document.getElementById("drawer");
@@ -175,8 +372,9 @@
   function cardHtml(item){
     const prov = Object.values(PROVIDERS).find(p=>p.kind===item.kind) || {};
     const tags = (item.tags||[]).slice(0,2).map(t=>`<span>${h(t)}</span>`).join("");
+    const detailHref = `#/detail/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}`;
     return `
-      <div class="card" data-go="#/detail/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}">
+      <div class="card" data-go="${detailHref}" data-prefetch-kind="${h(item.kind)}" data-prefetch-id="${h(item.id)}">
         <div class="poster">${imgTag(item.thumbnail,"",item.title)}<span class="badge src">${h(prov.label||item.source)}</span></div>
         <div class="meta"><div class="t">${h(item.title)}</div><div class="sub">${tags}</div></div>
       </div>`;
@@ -184,6 +382,23 @@
   const grid = (items) => (!items||!items.length) ? `<div class="empty">Tidak ada hasil.</div>` : `<div class="grid">${items.map(cardHtml).join("")}</div>`;
 
   document.addEventListener("click", (e)=>{ const el=e.target.closest("[data-go]"); if(el){ e.preventDefault(); go(el.dataset.go); } });
+
+  // Warm the detail endpoint when the pointer hovers a card (desktop) or on
+  // first touch (mobile) so opening it feels instant.
+  function _prefetchCard(el){
+    const kind = el.dataset.prefetchKind, id = el.dataset.prefetchId;
+    if(!kind || !id) return;
+    const ep = DETAIL_EP[kind];
+    if(!ep) return;
+    if(kind==="cosplay") prefetch(`/cosplay/${encodeURIComponent(id)}`);
+    else if(kind==="doujin") prefetch(`/nhentai/${encodeURIComponent(id)}`);
+    else if(kind==="donghua") prefetch(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size:EPISODE_SIZE})}`);
+    else prefetch(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size:CHAPTER_SIZE})}`);
+  }
+  document.addEventListener("pointerenter", (e)=>{
+    const el = e.target.closest && e.target.closest("[data-prefetch-kind]");
+    if(el) _prefetchCard(el);
+  }, true);
 
   function crumbs(items){
     return `<div class="crumbs">`+items.map((it,i)=> i<items.length-1?`<a href="${it.href}">${h(it.label)}</a><span>/</span>`:`<b>${h(it.label)}</b>`).join("")+`</div>`;
@@ -195,15 +410,16 @@
   async function routeHome(){
     shell(`
       <div class="hero-banner">
-        <h1>Nonton &amp; Baca, satu tempat.</h1>
-        <p>Streaming donghua, baca manga &amp; novel, galeri cosplay - ditenagai apiku.</p>
+        <h1>${escHtml(BRAND.name)}</h1>
+        <p>${escHtml(BRAND.tagline)}</p>
       </div>
+      ${adSlot("home")}
       <div id="rows"></div>
     `);
     const rows = document.getElementById("rows");
     let sections = [
       { title:"Donghua Terbaru", prov:"anichin",     feed:"home",          seg:"donghua" },
-      { title:"Manga Populer",   prov:"mangaball",   feed:"popular",       seg:"manga" },
+      { title:"Komik Populer",   prov:"mangaball",   feed:"popular",       seg:"manga" },
       { title:"Novel Terbaru",   prov:"novelid",     feed:"home",          seg:"novel" },
       { title:"Cosplay Terbaru", prov:"cosplaytele", feed:"home",          seg:"cosplay", adult:true },
       { title:"Doujin Hari Ini", prov:"nhentai",     feed:"popular-today", seg:"doujin",  adult:true },
@@ -212,7 +428,7 @@
       <div class="row-head"><h2><span class="dot"></span>${h(s.title)}</h2><a class="more" href="#/browse/${s.seg}">Lihat semua ${I.arrow}</a></div>
       <div id="row-${i}">${skelGrid(6)}</div>`).join("");
     sections.forEach(async (s,i)=>{
-      try { const data=await api(`/browse/${s.prov}?${qs({feed:s.feed})}`); document.getElementById(`row-${i}`).innerHTML=grid((data.items||[]).slice(0,12)); }
+      try { const data=await apiCached(`/browse/${s.prov}?${qs({feed:s.feed})}`); document.getElementById(`row-${i}`).innerHTML=grid((data.items||[]).slice(0,12)); }
       catch(e){ const el=document.getElementById(`row-${i}`); if(el) el.innerHTML=`<div class="errbox">Gagal memuat.</div>`; }
     });
   }
@@ -227,11 +443,12 @@
     shell(`
       <div class="row-head"><h2><span class="dot"></span>${h(prov.label)}</h2></div>
       <div class="chips">${feeds.map(([v,l])=>`<a class="chip ${v===feed?"active":""}" href="#/browse/${seg}/${v}">${h(l)}</a>`).join("")}</div>
+      ${adSlot("browse")}
       <div id="list">${skelGrid(18)}</div>
       <div id="pager"></div>
     `);
     try{
-      const data = await api(`/browse/${prov.api}?${qs({feed,page})}`);
+      const data = await apiCached(`/browse/${prov.api}?${qs({feed,page})}`);
       document.getElementById("list").innerHTML = grid(data.items);
       document.getElementById("pager").innerHTML = `
         <div class="pager">
@@ -239,6 +456,8 @@
           <span>Halaman ${page}</span>
           ${(data.items&&data.items.length)?`<a class="btn sm" href="#/browse/${seg}/${feed}/${page+1}">Berikutnya &rarr;</a>`:""}
         </div>`;
+      // warm the next page so paging feels instant
+      if(data.items&&data.items.length) prefetch(`/browse/${prov.api}?${qs({feed,page:page+1})}`);
     }catch(e){ document.getElementById("list").innerHTML=`<div class="errbox">${h(e.message)}</div>`; }
   }
 
@@ -250,32 +469,40 @@
       <div class="chips" id="srcChips"></div>
       <div id="list">${skelGrid(12)}</div>
     `);
-    // Build the source filter chips (hide adult unless enabled)
-    const sources = [["all","Semua"],["donghua","Donghua"],["manga","Manga"],["novel","Novel"]];
-    if(adultOn()){ sources.push(["cosplay","Cosplay"]); sources.push(["doujin","Doujin"]); }
+    const allSources = [["all","Semua"],["donghua","Donghua"],["manga","Komik"],["novel","Novel"]];
+    if(adultOn()){ allSources.push(["cosplay","Cosplay"]); allSources.push(["doujin","Doujin"]); }
+    // If a specific source is locked (e.g. via clicking a cosplayer/tag),
+    // query the backend for THAT source directly so we get high-precision
+    // results (cosplay relevance filter, doujin tag matching) instead of the
+    // broad cross-provider list.
+    if(src!=="all" && !providerVisible(src)) src = "all";
     try{
-      const data = await api(`/search?${qs({q:query, source:"all", page:1})}`);
+      const data = await apiCached(`/search?${qs({q:query, source:src, page:1})}`);
       let items = (data.items||[]).filter(it=>providerVisible(it.kind));
-      // counts per kind
-      const counts = {};
-      items.forEach(it=>{ counts[it.kind]=(counts[it.kind]||0)+1; });
       const chips = document.getElementById("srcChips");
-      chips.innerHTML = sources.map(([v,l])=>{
-        const c = v==="all" ? items.length : (counts[v]||0);
-        return `<button class="chip ${v===src?"active":""}" data-src="${v}">${h(l)} <span class="cnt">${c}</span></button>`;
-      }).join("");
-      const render = () => {
-        const filtered = src==="all" ? items : items.filter(it=>it.kind===src);
-        document.getElementById("list").innerHTML = grid(filtered);
-      };
+      if(src==="all"){
+        // Cross-provider: chips reflect per-kind counts, filtered client-side.
+        const counts = {};
+        items.forEach(it=>{ counts[it.kind]=(counts[it.kind]||0)+1; });
+        const visible = allSources.filter(([v])=> v==="all" || (counts[v]||0) > 0);
+        chips.innerHTML = visible.map(([v,l])=>{
+          const c = v==="all" ? items.length : (counts[v]||0);
+          return `<button class="chip ${v==="all"?"active":""}" data-src="${v}">${h(l)} <span class="cnt">${c}</span></button>`;
+        }).join("");
+        document.getElementById("list").innerHTML = grid(items);
+      }else{
+        // Locked to one source: results already precise from the backend.
+        const label = (allSources.find(([v])=>v===src)||[src,src])[1];
+        chips.innerHTML =
+          `<button class="chip" data-src="all">Semua</button>`+
+          `<button class="chip active" data-src="${src}">${h(label)} <span class="cnt">${items.length}</span></button>`;
+        document.getElementById("list").innerHTML = grid(items);
+      }
+      // Clicking a chip re-runs the search with that source (re-fetch).
       chips.querySelectorAll(".chip").forEach(ch => ch.addEventListener("click", ()=>{
-        src = ch.dataset.src;
-        chips.querySelectorAll(".chip").forEach(c=>c.classList.toggle("active", c.dataset.src===src));
-        // reflect in URL without reloading
-        history.replaceState(null,"",`#/search/${encodeURIComponent(query)}/${src}`);
-        render();
+        const v = ch.dataset.src;
+        go(v==="all" ? `#/search/${encodeURIComponent(query)}` : `#/search/${encodeURIComponent(query)}/${v}`);
       }));
-      render();
     }catch(e){ document.getElementById("list").innerHTML=`<div class="errbox">${h(e.message)}</div>`; }
   }
 
@@ -305,10 +532,30 @@
     try{
       if(kind==="cosplay") return renderCosplay(id);
       if(kind==="doujin") return renderDoujin(id);
-      const data = await api(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size:CHAPTER_SIZE})}`);
+      const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
+      const data = await apiCached(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`);
       if(kind==="donghua") return renderDonghuaSeries(id, data);
       return renderReadableSeries(kind, id, data, 1);
     }catch(e){ setD(`<div class="errbox">${h(e.message)}</div>`); }
+  }
+
+  // Render a "Rekomendasi" row at the bottom of a detail page, sourced from
+  // the provider's popular feed. Excludes the current item.
+  async function renderRecommendations(kind, excludeId){
+    const prov = PROVIDERS[kind];
+    if(!prov) return;
+    const host = document.createElement("div");
+    host.className = "rec-block";
+    host.innerHTML = `<div class="row-head"><h2><span class="dot"></span>Rekomendasi</h2><a class="more" href="#/browse/${kind}">Lihat semua ${I.arrow}</a></div><div id="recRow">${skelGrid(6)}</div>`;
+    const d = document.getElementById("d");
+    if(d) d.appendChild(host);
+    try{
+      const feed = (FEEDS[prov.api] && FEEDS[prov.api][1]) ? FEEDS[prov.api][1][0] : "popular";
+      const data = await apiCached(`/browse/${prov.api}?${qs({feed})}`);
+      let items = (data.items||[]).filter(it=>it.id!==excludeId).slice(0,12);
+      const row = document.getElementById("recRow");
+      if(row) row.innerHTML = grid(items);
+    }catch(e){ const row=document.getElementById("recRow"); if(row) row.innerHTML=`<div class="empty">Tidak ada rekomendasi.</div>`; }
   }
 
   function renderDonghuaSeries(id, data){
@@ -319,14 +566,46 @@
       ...(data.genres||[]).slice(0,5).map(g=>`<span class="pill">${h(g)}</span>`),
     ].join("");
     const first = eps[0];
-    const actions = first?`<a class="btn primary" href="#/watch/${encodeURIComponent(first.id)}">${I.play} Tonton Eps ${first.number}</a>`:"";
-    const list = eps.length?`<div class="ep-list">${eps.map(e=>`<button class="ep-btn center" data-go="#/watch/${encodeURIComponent(e.id)}">Eps ${e.number}</button>`).join("")}</div>`:`<div class="empty">Belum ada episode.</div>`;
-    setD(heroHtml("donghua","Donghua",data,facts,actions,data.synopsis,data.cover)+`<div class="row-head"><h2><span class="dot"></span>Episode</h2></div>${list}`);
+    const last = eps[eps.length-1];
+    const actions = [
+      first?`<a class="btn primary" href="#/watch/${encodeURIComponent(first.id)}">${I.play} Tonton Eps ${first.number}</a>`:"",
+      (last && last!==first)?`<a class="btn" href="#/watch/${encodeURIComponent(last.id)}">Eps terbaru ${last.number}</a>`:"",
+    ].join("");
+
+    // Episode access helper: search box (jump to a number) + a scrollable
+    // grid. For very long series we keep the grid but make it searchable.
+    const epControls = eps.length>24
+      ? `<div class="ep-tools"><input id="epSearch" type="search" inputmode="numeric" placeholder="Lompat ke episode... (mis. 120)" autocomplete="off"></div>`
+      : "";
+    const epGrid = eps.length
+      ? `<div class="ep-list" id="epList">${eps.map(e=>`<button class="ep-btn center" data-ep="${e.number}" data-go="#/watch/${encodeURIComponent(e.id)}">Eps ${e.number}</button>`).join("")}</div>`
+      : `<div class="empty">Belum ada episode.</div>`;
+
+    setD(
+      heroHtml("donghua","Donghua",data,facts,actions,data.synopsis,data.cover)+
+      `<div class="row-head"><h2><span class="dot"></span>Episode <span class="cnt-badge">${eps.length}</span></h2></div>${epControls}${epGrid}`
+    );
+
+    // wire episode search/jump
+    const epSearch = document.getElementById("epSearch");
+    if(epSearch){
+      epSearch.addEventListener("input", ()=>{
+        const q = epSearch.value.trim().toLowerCase();
+        document.querySelectorAll("#epList .ep-btn").forEach(b=>{
+          const n = (b.dataset.ep||"").toLowerCase();
+          b.style.display = (!q || n.includes(q)) ? "" : "none";
+        });
+      });
+    }
+
+    // warm the first episode + recommendations
+    if(first) prefetch(`/donghua/episode/${encodeURIComponent(first.id)}`);
+    renderRecommendations("donghua", id);
   }
 
   // Manga/novel — with LANGUAGE GROUPING for manga (translations).
-  async function renderReadableSeries(kind, id, data, page){
-    const label = kind==="manga"?"Manga":"Novel";
+  async function renderReadableSeries(kind, id, data, page, activeLang){
+    const label = kind==="manga"?"Komik":"Novel";
     const chs = data.chapters||[];
     const totalPages = data.chapter_total_pages||1;
     const facts = [
@@ -348,21 +627,29 @@
       });
       languages = [...set.entries()].sort((a,b)=>b[1]-a[1]); // [lang, count]
     }
-    const langState = { active: "__all__" };
+    // Preserve the chosen language across pager reloads; default to "all".
+    const validLang = activeLang && (activeLang==="__all__" || languages.some(([l])=>l===activeLang));
+    const langState = { active: validLang ? activeLang : "__all__" };
 
-    const first = chs[0];
-    const firstReadId = (() => {
-      if (kind !== "manga" || !first) return first ? first.id : null;
-      // prefer a translation in the active language, else the chapter's own id
-      return first.id;
-    })();
+    // chapters actually available in the active language (for first-read + count)
+    const chsInLang = (lang)=> (kind!=="manga"||lang==="__all__")
+      ? chs
+      : chs.filter(c => (c.translations||[]).some(t => (t.language||"Lainnya")===lang));
+
+    const firstList = chsInLang(langState.active);
+    const first = firstList[0];
+    const firstReadId = first
+      ? (kind==="manga" && langState.active!=="__all__"
+          ? ((first.translations||[]).find(t=>(t.language||"Lainnya")===langState.active)||first).id
+          : first.id)
+      : null;
     const actions = firstReadId?`<a class="btn primary" href="#/${readPath}/${encodeURIComponent(firstReadId)}">${I.book} Mulai Baca</a>`:"";
     const syn = data.description || data.synopsis;
 
     const langTabs = (kind==="manga" && languages.length>1)
       ? `<div class="lang-tabs" id="langTabs">
-          <button class="lang-tab active" data-lang="__all__">Semua <span class="cnt">${chs.length}</span></button>
-          ${languages.map(([l,c])=>`<button class="lang-tab" data-lang="${h(l)}">${h(l)} <span class="cnt">${c}</span></button>`).join("")}
+          <button class="lang-tab ${langState.active==="__all__"?"active":""}" data-lang="__all__">Semua <span class="cnt">${chs.length}</span></button>
+          ${languages.map(([l,c])=>`<button class="lang-tab ${langState.active===l?"active":""}" data-lang="${h(l)}">${h(l)} <span class="cnt">${c}</span></button>`).join("")}
          </div>`
       : "";
 
@@ -399,7 +686,7 @@
        <div class="ep-list wide" id="chList">${chs.length?chapterRowsFor(langState.active):`<div class="empty">Belum ada bab.</div>`}</div>${pager}`
     );
 
-    // wire language tabs
+    // wire language tabs (persist selection)
     const tabsEl = document.getElementById("langTabs");
     if (tabsEl) {
       tabsEl.querySelectorAll(".lang-tab").forEach(tab => tab.addEventListener("click", ()=>{
@@ -409,45 +696,116 @@
       }));
     }
 
-    // wire chapter pager
+    // wire chapter pager — keep the active language when reloading a page
     const ep = DETAIL_EP[kind];
     const load = async (p)=>{
       document.querySelectorAll("#d .ep-list").forEach(n=>n.innerHTML=`<div class="spinner"></div>`);
-      const fresh = await api(`/${ep}/${encodeURIComponent(id)}?${qs({page:p,size:CHAPTER_SIZE})}`);
-      renderReadableSeries(kind, id, fresh, p);
+      const fresh = await apiCached(`/${ep}/${encodeURIComponent(id)}?${qs({page:p,size:CHAPTER_SIZE})}`);
+      renderReadableSeries(kind, id, fresh, p, langState.active);
     };
     const pv=document.getElementById("ch-prev"); if(pv) pv.onclick=()=>load(page-1);
     const nx=document.getElementById("ch-next"); if(nx) nx.onclick=()=>load(page+1);
+
+    // warm the first chapter + next chapter page + recommendations
+    if(firstReadId) prefetch(`/${kind==="manga"?"manga/chapter":"novel/chapter"}/${encodeURIComponent(firstReadId)}`);
+    if(page<totalPages) prefetch(`/${ep}/${encodeURIComponent(id)}?${qs({page:page+1,size:CHAPTER_SIZE})}`);
+    renderRecommendations(kind, id);
   }
 
   async function renderCosplay(id){
-    const data = await api(`/cosplay/${encodeURIComponent(id)}`);
+    const data = await apiCached(`/cosplay/${encodeURIComponent(id)}`);
+    // Cosplayer name is clickable -> search that name, locked to cosplay.
+    const searchChip = (kind, label) => `#/search/${encodeURIComponent(label)}/${kind}`;
     const facts = [
-      data.cosplayer?`<span class="pill">${h(data.cosplayer)}</span>`:"",
+      data.cosplayer?`<a class="pill link" href="${searchChip("cosplay", data.cosplayer)}">${h(data.cosplayer)}</a>`:"",
       data.character?`<span class="pill">${h(data.character)}</span>`:"",
       data.series?`<span class="pill">${h(data.series)}</span>`:"",
       data.photo_count?`<span class="pill">${data.photo_count} foto</span>`:"",
-      ...(data.tags||[]).slice(0,4).map(t=>`<span class="pill">${h(t)}</span>`),
+      data.video_count?`<span class="pill">${data.video_count} video</span>`:"",
+      ...(data.tags||[]).slice(0,4).map(t=>`<a class="pill link" href="${searchChip("cosplay", t)}">${h(t)}</a>`),
     ].join("");
     const dls = (data.downloads||[]).map(d=>`<a class="btn sm" target="_blank" rel="noopener" href="${h(d.url)}">${h(d.name)}</a>`).join("");
     const actions = dls + (data.unzip_password?`<span class="pill">&#128273; ${h(data.unzip_password)}</span>`:"");
-    const imgs = (data.images||[]).map(u=>`<a href="${h(u)}" target="_blank" rel="noopener">${imgTag(u,"","")}</a>`).join("");
-    setD(heroHtml("cosplay","Cosplay",data,facts,actions,null,data.cover)+
-      `<div class="row-head"><h2><span class="dot"></span>${(data.images||[]).length} Foto</h2></div><div class="gallery">${imgs}</div>`);
+
+    // Video player(s) FIRST, before the photo flow.
+    const vids = (data.videos||[]);
+    const videoBlock = vids.length
+      ? `<div class="row-head"><h2><span class="dot"></span>Video</h2></div>` +
+        vids.map((u,i)=>{
+          const isFile = /\.(mp4|webm|m4v|mov)(\?|$)/i.test(u);
+          if(isFile){
+            return `<div class="video-wrap"><video controls preload="metadata" playsinline src="${h(u)}"></video></div>`;
+          }
+          // Cosplaytele videos resolve through our backend (/api/v1/cosplay-video),
+          // which decrypts the cossora embed and returns an HLS stream we proxy
+          // and play with hls.js. Other embeds fall back to an iframe.
+          if(/\/cosplay-video\?/.test(u)){
+            return `<div class="video-wrap hls" data-resolve="${escAttr(u)}" data-idx="${i}">
+                <video id="hls-${i}" controls preload="metadata" playsinline></video>
+                <div class="hls-state" id="hls-state-${i}">${spinner}</div>
+              </div>`;
+          }
+          return `<div class="embed-wrap">
+              <div class="embed-fallback">Sumber video eksternal. <a class="btn sm" href="${h(u)}" target="_blank" rel="noopener noreferrer">${I.play} Buka video ${I.arrow}</a></div>
+            </div>`;
+        }).join("")
+      : "";
+
+    // Photos: natural aspect ratio masonry (not forced 2:3).
+    const imgs = (data.images||[]).map(u=>`<a href="${h(u)}" target="_blank" rel="noopener">${imgNatural(u,"")}</a>`).join("");
+
+    setD(
+      heroHtml("cosplay","Cosplay",data,facts,actions,null,data.cover)+
+      videoBlock+
+      `<div class="row-head"><h2><span class="dot"></span>${(data.images||[]).length} Foto</h2></div>`+
+      `<div class="gallery">${imgs||`<div class="empty">Tidak ada foto.</div>`}</div>`
+    );
+    // Resolve + attach HLS players
+    document.querySelectorAll(".video-wrap.hls").forEach(el => attachHls(el));
+    renderRecommendations("cosplay", id);
   }
 
   async function renderDoujin(id){
-    const data = await api(`/nhentai/${encodeURIComponent(id)}`);
-    const facts = [ data.author?`<span class="pill">${h(data.author)}</span>`:"", ...(data.genres||[]).slice(0,6).map(g=>`<span class="pill">${h(g)}</span>`) ].join("");
+    const data = await apiCached(`/nhentai/${encodeURIComponent(id)}`);
+    // Tags/genres are clickable -> search "[tag]" locked to doujin (nhentai
+    // supports the `[tag]` syntax for an exact-tag match).
+    const tagSearch = (t) => `#/search/${encodeURIComponent("["+t+"]")}/doujin`;
+    const nameSearch = (t) => `#/search/${encodeURIComponent(t)}/doujin`;
+    const facts = [
+      data.author?`<a class="pill link" href="${nameSearch(data.author)}">&#9997; ${h(data.author)}</a>`:"",
+      data.artist?`<a class="pill link" href="${nameSearch(data.artist)}">${h(data.artist)}</a>`:"",
+      ...(data.genres||[]).slice(0,16).map(g=>`<a class="pill link" href="${tagSearch(g)}">${h(g)}</a>`)
+    ].join("");
     const first = (data.chapters||[])[0];
     const actions = first?`<a class="btn primary" href="#/read/nhentai/${encodeURIComponent(first.id)}">${I.book} Baca</a>`:"";
-    setD(heroHtml("doujin","Doujin",data,facts,actions,data.description,data.cover));
+    setD(
+      heroHtml("doujin","Doujin",data,facts,actions,null,data.cover)+
+      `<div class="row-head"><h2><span class="dot"></span>Pratinjau Halaman</h2></div>
+       <div id="preview" class="thumb-grid">${skelGrid(8)}</div>`
+    );
+    // Lazy-load page thumbnails as a preview grid; click jumps into the reader.
+    if(first){
+      if(first.id) prefetch(`/nhentai/chapter/${encodeURIComponent(first.id)}`);
+      try{
+        const c = await apiCached(`/nhentai/chapter/${encodeURIComponent(first.id)}`);
+        const pages = c.pages||[];
+        const readHref = `#/read/nhentai/${encodeURIComponent(first.id)}`;
+        const cells = pages.slice(0,24).map(p=>`
+          <a class="thumb" href="${readHref}"><div class="poster">${imgTag(p.url,"","hal "+p.index)}<span class="badge">${p.index}</span></div></a>`).join("");
+        const more = pages.length>24?`<a class="thumb more" href="${readHref}"><div class="poster"><div class="ph">+${pages.length-24} halaman</div></div></a>`:"";
+        const el = document.getElementById("preview");
+        if(el) el.innerHTML = pages.length?cells+more:`<div class="empty">Tidak ada halaman.</div>`;
+      }catch(e){ const el=document.getElementById("preview"); if(el) el.innerHTML=`<div class="errbox">${h(e.message)}</div>`; }
+    } else {
+      const el=document.getElementById("preview"); if(el) el.innerHTML=`<div class="empty">Tidak ada halaman.</div>`;
+    }
+    renderRecommendations("doujin", id);
   }
 
   async function routeWatch(id){
     shell(`<div id="d">${spinner}</div>`);
     try{
-      const e = await api(`/donghua/episode/${encodeURIComponent(id)}`);
+      const e = await apiCached(`/donghua/episode/${encodeURIComponent(id)}`);
       const servers = e.servers||[];
       const seriesLink = e.series_id?`#/detail/donghua/${encodeURIComponent(e.series_id)}`:"#/";
       const player = servers.length?`<div class="player-wrap"><div class="frame"><iframe id="player" src="${h(servers[0].embed_url)}" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture"></iframe></div></div>`:`<div class="empty">Tidak ada server video.</div>`;
@@ -458,11 +816,17 @@
         <a class="btn sm" href="${seriesLink}">&#9776; Semua episode</a>
         ${e.next_id?`<a class="btn sm" href="#/watch/${encodeURIComponent(e.next_id)}">Eps berikutnya &rarr;</a>`:""}</div>`;
       setView(
+        `<div id="d">`+
         crumbs([{href:"#/",label:"Home"},{href:"#/browse/donghua",label:"Donghua"},{label:`${e.series_title||"Episode"} - Eps ${e.episode_number}`}])+
         `<div class="row-head"><h2><span class="dot"></span>${h(e.series_title||"Episode")} - Episode ${e.episode_number}</h2></div>`+
-        player+bar+nav+(dls?`<div class="row-head"><h2><span class="dot"></span>Unduh</h2></div>${dls}`:"")
+        player+bar+nav+(dls?`<div class="row-head"><h2><span class="dot"></span>Unduh</h2></div>${dls}`:"")+
+        `</div>`
       );
       document.querySelectorAll(".server-bar .srv").forEach(btn=>{ btn.onclick=()=>{ document.getElementById("player").src=btn.dataset.src; document.querySelectorAll(".server-bar .srv").forEach(b=>b.classList.remove("active")); btn.classList.add("active"); }; });
+      // warm adjacent episodes for instant nav, plus recommendations
+      if(e.next_id) prefetch(`/donghua/episode/${encodeURIComponent(e.next_id)}`);
+      if(e.prev_id) prefetch(`/donghua/episode/${encodeURIComponent(e.prev_id)}`);
+      renderRecommendations("donghua", e.series_id);
     }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
   }
 
@@ -471,15 +835,44 @@
     try{
       if(kind==="novel") return renderNovelChapter(id);
       const ep = kind==="nhentai"?"nhentai/chapter":"manga/chapter";
-      const c = await api(`/${ep}/${encodeURIComponent(id)}`);
+      const c = await apiCached(`/${ep}/${encodeURIComponent(id)}`);
       const pages = c.pages||[];
+      // Pages render at natural width (no forced ratio); the reader column is
+      // capped for readability and can go fullscreen so the navbar etc. don't
+      // get in the way.
       const imgs = pages.map(p=>`<img loading="lazy" referrerpolicy="no-referrer" src="${h(p.url)}" alt="page ${p.index}" onerror="this.style.opacity=.25">`).join("");
-      setView(`<div class="row-head"><h2><span class="dot"></span>${h(c.series_title||"Baca")} ${c.chapter_number?`&middot; Ch ${c.chapter_number}`:""}</h2></div><div class="reader">${pages.length?imgs:`<div class="empty">Tidak ada halaman.</div>`}</div>`);
+      const title = `${h(c.series_title||"Baca")} ${c.chapter_number?`&middot; Ch ${c.chapter_number}`:""}`;
+      const nav = `
+        ${c.prev_id?`<a class="btn sm" href="#/read/${kind}/${encodeURIComponent(c.prev_id)}">&larr; Sebelumnya</a>`:""}
+        ${c.series_id?`<a class="btn sm" href="#/detail/${kind==="nhentai"?"doujin":"manga"}/${encodeURIComponent(c.series_id)}">&#9776; Daftar</a>`:""}
+        ${c.next_id?`<a class="btn sm" href="#/read/${kind}/${encodeURIComponent(c.next_id)}">Berikutnya &rarr;</a>`:""}`;
+      const navTrim = nav.trim();
+      setView(
+        `<div class="reader-shell" id="readerShell">
+           <div class="reader-bar">
+             <div class="reader-title">${title}</div>
+             <button class="btn sm" id="fsBtn">${I.expand} Layar penuh</button>
+           </div>
+           <div class="reader" id="readerPages">${pages.length?imgs:`<div class="empty">Tidak ada halaman.</div>`}</div>
+           ${adSlot("reader")}
+           ${navTrim?`<div class="reader-nav">${nav}</div>`:""}
+         </div>`
+      );
+      // fullscreen toggle
+      const shellEl = document.getElementById("readerShell");
+      const fsBtn = document.getElementById("fsBtn");
+      if(fsBtn && shellEl){
+        const sync = ()=>{ const on = document.fullscreenElement===shellEl; fsBtn.innerHTML = on?`${I.compress} Keluar`:`${I.expand} Layar penuh`; };
+        fsBtn.onclick = ()=>{ if(document.fullscreenElement===shellEl){ document.exitFullscreen&&document.exitFullscreen(); } else { shellEl.requestFullscreen&&shellEl.requestFullscreen().catch(()=>{}); } };
+        document.addEventListener("fullscreenchange", sync);
+      }
+      // warm next chapter for instant paging
+      if(c.next_id) prefetch(`/${ep}/${encodeURIComponent(c.next_id)}`);
     }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
   }
 
   async function renderNovelChapter(id){
-    const c = await api(`/novel/chapter/${encodeURIComponent(id)}`);
+    const c = await apiCached(`/novel/chapter/${encodeURIComponent(id)}`);
     const paras = (c.body||"").split(/\n{2,}/).map(s=>s.trim()).filter(Boolean).map(p=>`<p>${h(p)}</p>`).join("");
     const nav = `<div class="reader-nav">
       ${c.prev_id?`<a class="btn sm" href="#/read/novel/${encodeURIComponent(c.prev_id)}">&larr; Sebelumnya</a>`:""}
@@ -488,10 +881,11 @@
     setView(`<div class="row-head"><h2><span class="dot"></span>${h(c.series_title||"Novel")} &middot; Bab ${c.chapter_number}</h2></div>`+
       (c.chapter_title?`<p style="color:var(--muted);margin-top:-8px">${h(c.chapter_title)}</p>`:"")+
       `<div class="novel-body">${paras||"<p>(kosong)</p>"}</div>`+nav);
+    if(c.next_id) prefetch(`/novel/chapter/${encodeURIComponent(c.next_id)}`);
   }
 
   // route dispatch is defined in part 2 (appended)
-  window.__apiku = { shell, setView, viewEl, h, qs, api, apiRaw, spinner, go, I,
+  window.__apiku = { shell, setView, viewEl, h, qs, api, apiRaw, apiCached, prefetch, spinner, go, I,
     routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeRead };
 })();
 
@@ -679,6 +1073,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         </table>
 
         <p style="margin-top:24px">Butuh konsol penuh? Buka <a href="#/explorer">Explorer</a> atau <a href="/tester">dev console</a>.</p>
+
+        <h2>Informasi</h2>
+        <p>Dikembangkan oleh <a href="https://github.com/risqinf" target="_blank" rel="noopener"><b>@risqinf</b></a>. Lihat kode sumber &amp; kontribusi di <a href="https://github.com/risqinf/apiku" target="_blank" rel="noopener">GitHub</a>.</p>
       </div>
     `);
 
@@ -707,63 +1104,208 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
 
   // ---- Explorer -----------------------------------------------------------
-  const EXP = [
-    "/api/v1/info",
-    "/api/v1/search?q=one+piece&source=all&page=1",
-    "/api/v1/browse/anichin?feed=home",
-    "/api/v1/browse/mangaball?feed=popular",
-    "/api/v1/browse/novelid?feed=home",
-    "/api/v1/browse/nhentai?feed=popular-today",
-    "/api/v1/manga/{id}?page=1&size=60",
-    "/api/v1/manga/chapter/{id}",
-    "/api/v1/donghua/{id}",
-    "/api/v1/donghua/episode/{id}",
-    "/api/v1/novel/{id}?page=1&size=60",
-    "/api/v1/novel/chapter/{id}",
-    "/api/v1/nhentai/{id}",
+  // Grouped preset endpoints: [group, [[label, path], ...]]
+  const EXP_GROUPS = [
+    ["Umum", [
+      ["Info server", "/api/v1/info"],
+      ["Health check", "/api/v1/health"],
+    ]],
+    ["Pencarian", [
+      ["Cari semua sumber", "/api/v1/search?q=one+piece&source=all&page=1"],
+      ["Cari komik", "/api/v1/search?q=one+piece&source=manga&page=1"],
+      ["Cari donghua", "/api/v1/search?q=martial&source=donghua&page=1"],
+      ["Cari novel", "/api/v1/search?q=martial&source=novel&page=1"],
+    ]],
+    ["Browse / Feed", [
+      ["Donghua terbaru", "/api/v1/browse/anichin?feed=home"],
+      ["Komik populer", "/api/v1/browse/mangaball?feed=popular"],
+      ["Novel terbaru", "/api/v1/browse/novelid?feed=home"],
+      ["Doujin hari ini", "/api/v1/browse/nhentai?feed=popular-today"],
+    ]],
+    ["Detail (ganti {id})", [
+      ["Komik", "/api/v1/manga/{id}?page=1&size=60"],
+      ["Bab komik", "/api/v1/manga/chapter/{id}"],
+      ["Donghua", "/api/v1/donghua/{id}"],
+      ["Episode donghua", "/api/v1/donghua/episode/{id}"],
+      ["Novel", "/api/v1/novel/{id}?page=1&size=60"],
+      ["Bab novel", "/api/v1/novel/chapter/{id}"],
+      ["Doujin", "/api/v1/nhentai/{id}"],
+    ]],
   ];
 
+  // Build copy-ready code samples for an arbitrary API path, across languages.
+  function codeSamplesForPath(origin, relPath) {
+    const full = origin + relPath;
+    return {
+      curl:
+`curl '${full}'
+
+# pretty-print
+curl -s '${full}' | jq .`,
+      javascript:
+`const res = await fetch('${full}');
+const json = await res.json();
+if (!json.ok) throw new Error(json.error.code + ': ' + json.error.message);
+console.log(json.data);`,
+      python:
+`import requests
+
+r = requests.get('${full}')
+r.raise_for_status()
+body = r.json()
+if not body['ok']:
+    raise RuntimeError(body['error']['code'])
+print(body['data'])`,
+      php:
+`<?php
+$res  = file_get_contents('${full}');
+$json = json_decode($res, true);
+if (!$json['ok']) {
+    throw new RuntimeException($json['error']['code']);
+}
+var_dump($json['data']);`,
+      go:
+`package main
+
+import ("encoding/json"; "fmt"; "io"; "net/http")
+
+func main() {
+    resp, _ := http.Get("${full}")
+    defer resp.Body.Close()
+    body, _ := io.ReadAll(resp.Body)
+    var env map[string]any
+    json.Unmarshal(body, &env)
+    fmt.Println(env["data"])
+}`,
+      rust:
+`// reqwest = { version = "0.12", features = ["json"] }
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let v: serde_json::Value = reqwest::get("${full}")
+        .await?.json().await?;
+    println!("{:#}", v["data"]);
+    Ok(())
+}`,
+    };
+  }
+
+  const EXP_LANGS = [["curl","cURL"],["javascript","JavaScript"],["python","Python"],["php","PHP"],["go","Go"],["rust","Rust"]];
+
   function routeExplorer() {
+    const origin = location.origin;
+    const initial = "/api/v1/info";
     shell(`
       <div class="explorer">
-        <div class="hero-banner"><h1>API Explorer</h1><p>Uji endpoint <code>/api/v1/*</code> langsung dan lihat JSON mentah.</p></div>
-        <div class="exp-controls">
-          <select id="exp-preset">
-            <option value="">— pilih endpoint —</option>
-            ${EXP.map(p=>`<option value="${h(p)}">${h(p)}</option>`).join("")}
-          </select>
-          <div class="exp-row">
-            <input id="exp-path" type="text" value="/api/v1/info" spellcheck="false">
-            <button class="btn primary" id="exp-send">Kirim</button>
+        <div class="hero-banner"><h1>API Explorer</h1><p>Uji endpoint <code>/api/v1/*</code> langsung, lihat respons, dan salin contoh kode siap pakai.</p></div>
+
+        <div class="exp-grid">
+          <aside class="exp-side">
+            <div class="exp-side-title">Endpoint</div>
+            ${EXP_GROUPS.map(([g,items])=>`
+              <div class="exp-group">
+                <div class="exp-group-name">${h(g)}</div>
+                ${items.map(([label,path])=>`<button class="exp-ep" data-path="${h(path)}">${h(label)}<code>${h(path.replace(/^\/api\/v1/,""))}</code></button>`).join("")}
+              </div>`).join("")}
+          </aside>
+
+          <div class="exp-main">
+            <div class="exp-panel">
+              <div class="exp-bar">
+                <span class="exp-method">GET</span>
+                <input id="exp-path" type="text" value="${h(initial)}" spellcheck="false" placeholder="/api/v1/...">
+                <button class="btn primary" id="exp-send">${I.play} Kirim</button>
+              </div>
+              <p class="exp-tip">Tip: ganti <code>{id}</code> dengan opaque id dari hasil <a href="#/search/one piece">search</a> atau browse.</p>
+            </div>
+
+            <div class="exp-resp">
+              <div class="exp-resp-head">
+                <div class="exp-meta" id="exp-meta"><span class="pill">siap</span></div>
+                <button class="btn sm" id="exp-copy">Salin JSON</button>
+              </div>
+              <pre class="exp-out" id="exp-out">// Tekan "Kirim" untuk melihat respons.</pre>
+            </div>
+
+            <div class="exp-code">
+              <div class="exp-code-head">
+                <h3>Contoh kode</h3>
+                <div class="lang-pills" id="expLangs">
+                  ${EXP_LANGS.map(([v,l],i)=>`<button class="${i===0?"active":""}" data-lang="${v}">${l}</button>`).join("")}
+                </div>
+              </div>
+              <div id="expSample"></div>
+            </div>
           </div>
-          <p style="color:var(--muted);font-size:12px;margin:8px 0 0">Tip: ganti <code>{id}</code> dengan opaque id dari hasil search/browse.</p>
         </div>
-        <div class="exp-meta" id="exp-meta"></div>
-        <pre class="exp-out" id="exp-out">// Respons akan tampil di sini.</pre>
       </div>
     `);
     const pathInput = document.getElementById("exp-path");
-    const preset = document.getElementById("exp-preset");
-    preset.addEventListener("change", ()=>{ if(preset.value) pathInput.value = preset.value; });
+    let curLang = "curl";
+
+    const renderSample = ()=>{
+      const raw = pathInput.value.trim();
+      const safeRel = raw.startsWith("/api/v1")
+        ? raw
+        : ("/api/v1" + raw.replace(/^.*\/api\/v1/, "").replace(/^\/?/, "/"));
+      const samples = codeSamplesForPath(origin, safeRel);
+      document.getElementById("expSample").innerHTML = codeBlock(curLang, samples[curLang]);
+      bindCopy();
+    };
+
     const send = async ()=>{
       let path = pathInput.value.trim();
+      if(!path) return;
       const rel = path.replace(/^.*\/api\/v1/, "").replace(/^\/?/, "/");
       const meta = document.getElementById("exp-meta");
       const out = document.getElementById("exp-out");
+      const btn = document.getElementById("exp-send");
       meta.innerHTML = `<span class="pill">...</span>`;
-      out.textContent = "Loading...";
+      out.textContent = "Memuat...";
+      btn.disabled = true;
       try {
         const res = await apiRaw("GET", rel);
-        const cls = res.status === 200 ? "ok" : "";
-        meta.innerHTML = `<span class="pill ${cls}">HTTP ${res.status}</span> <span class="pill">${res.ms} ms</span>`;
+        const ok2 = res.status >= 200 && res.status < 300;
+        const cls = ok2 ? "ok" : "bad";
+        meta.innerHTML = `<span class="pill ${cls}">HTTP ${res.status}</span> <span class="pill">${res.ms} ms</span> <span class="pill">${ok2?"sukses":"gagal"}</span>`;
         out.textContent = typeof res.json === "string" ? res.json : JSON.stringify(res.json, null, 2);
       } catch (e) {
-        meta.innerHTML = `<span class="pill">error</span>`;
+        meta.innerHTML = `<span class="pill bad">error</span>`;
         out.textContent = String(e.message || e);
-      }
+      } finally { btn.disabled = false; }
+      renderSample();
     };
+
     document.getElementById("exp-send").addEventListener("click", send);
-    pathInput.addEventListener("keydown", (e)=>{ if(e.key==="Enter") send(); });
+    pathInput.addEventListener("input", renderSample);
+    pathInput.addEventListener("keydown", (e)=>{ if(e.key==="Enter"){ e.preventDefault(); send(); } });
+
+    // sidebar endpoint buttons
+    document.querySelectorAll(".exp-ep").forEach(b => b.addEventListener("click", ()=>{
+      document.querySelectorAll(".exp-ep").forEach(x=>x.classList.remove("active"));
+      b.classList.add("active");
+      pathInput.value = b.dataset.path;
+      renderSample();
+      send();
+    }));
+
+    // language pills
+    document.querySelectorAll("#expLangs button").forEach(b => b.addEventListener("click", ()=>{
+      document.querySelectorAll("#expLangs button").forEach(x=>x.classList.toggle("active", x===b));
+      curLang = b.dataset.lang;
+      renderSample();
+    }));
+
+    // copy response JSON
+    document.getElementById("exp-copy").addEventListener("click", (e)=>{
+      const txt = document.getElementById("exp-out").textContent;
+      navigator.clipboard.writeText(txt).then(
+        ()=>{ e.target.textContent="Tersalin"; setTimeout(()=>e.target.textContent="Salin JSON",1200); },
+        ()=>{ e.target.textContent="Gagal"; setTimeout(()=>e.target.textContent="Salin JSON",1200); }
+      );
+    });
+
+    renderSample();
+    send();
   }
 
   // ---- Router -------------------------------------------------------------

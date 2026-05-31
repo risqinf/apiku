@@ -22,3 +22,10 @@ desktop.ini
 .env
 .env.local
 config.local.toml
+
+# --- Operator-specific static files (verification, ads, sitemaps) ---
+# Keep the directory + its docs/robots, but don't commit per-deployment files.
+/public/*
+!/public/README.md
+!/public/robots.txt
+
