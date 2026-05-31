@@ -25,7 +25,8 @@
 - **Adaptive runtime.** CPU and RAM are detected at startup; tokio threads, HTTP concurrency, and cache sizes are tuned automatically.
 - **Single-flight cache.** Concurrent requests for the same URL collapse into one upstream fetch.
 - **Browse + search + detail + paged chapter list** for every provider.
-- **Built-in tester website.** Live request playground, multi-language code examples, full reference, security notes — at `/`.
+- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform: home rows, per-provider browse with feed filters, search, donghua player with server switching, manga/doujin reader, novel text reader, and cosplay galleries.
+- **Developer API console at `/tester`.** Live request playground, multi-language code examples, full reference, security notes.
 
 ---
 
@@ -66,7 +67,7 @@ cargo build --release
 ./target/release/apiku serve --bind 0.0.0.0:8080 --log debug --log-file apiku.log
 ```
 
-Open `http://127.0.0.1:3000/` for the tester website. No API key required.
+Open `http://127.0.0.1:3000/` for the **web app** — a full streaming/reading platform (browse, search, watch donghua, read manga & novels, view cosplay galleries). The developer API console lives at `http://127.0.0.1:3000/tester`. No API key required.
 
 ### Try it without building
 
@@ -1020,9 +1021,12 @@ src/
 ├── log.rs             Coloured tracing-subscriber setup, banner
 ├── api.rs             REST handlers, DTOs, response envelopes, browse + paging
 ├── server.rs          axum router, middleware (request-id, CORS, compression)
-├── tester.rs          Tester website (maud), embedded CSS/JS
-├── tester.css         Tester stylesheet (compiled in)
-├── tester.js          Tester client-side script (compiled in)
+├── tester.rs          Developer API console (maud), embedded CSS/JS
+├── tester.css         API console stylesheet (compiled in)
+├── tester.js          API console client-side script (compiled in)
+├── webapp.rs          Consumer streaming/reading SPA shell
+├── app.css            Web app stylesheet (compiled in)
+├── app.js             Web app SPA router + views (compiled in)
 ├── opaque.rs          HMAC-SHA256 opaque ID + image-proxy signing
 ├── fingerprint.rs     Browser fingerprint catalogue (Win/macOS/Linux/Android/iOS)
 ├── search.rs          Cross-provider search abstraction

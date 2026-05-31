@@ -26,6 +26,7 @@ mod search;
 mod server;
 mod sysspec;
 mod tester;
+mod webapp;
 
 use clap::{Parser as ClapParser, Subcommand};
 use config::AppConfig;

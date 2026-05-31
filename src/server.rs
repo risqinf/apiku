@@ -3,7 +3,8 @@
 //!
 //! Routes:
 //!
-//!   GET /                            -> tester website
+//!   GET /                            -> consumer web app (streaming/reading SPA)
+//!   GET /tester                      -> developer API console
 //!   GET /api/v1/health               -> liveness probe
 //!   GET /api/v1/info                 -> version + system tuning + provider list
 //!   GET /api/v1/search               -> cross-provider search
@@ -22,6 +23,7 @@
 
 use crate::api::{self, ApiState};
 use crate::tester;
+use crate::webapp;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -43,8 +45,10 @@ pub fn build_router(state: ApiState) -> Router {
         .allow_headers(Any);
 
     Router::new()
-        // HTML tester
-        .route("/", get(tester::home))
+        // Consumer web app (streaming / reading platform)
+        .route("/", get(webapp::index))
+        // Developer API console
+        .route("/tester", get(tester::home))
         // REST API
         .route("/api/v1/health", get(api::health))
         .route("/api/v1/info", get(api::info))

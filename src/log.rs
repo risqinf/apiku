@@ -284,7 +284,8 @@ pub fn banner(addr: &std::net::SocketAddr, sysspec: &crate::sysspec::SysSpec) {
     eprintln!("{}", dim.paint("  RESTful scraping API"));
     eprintln!();
     eprintln!("  {}  http://{}", info.paint("Listening "), addr);
-    eprintln!("  {}  http://{}/", info.paint("Tester     "), addr);
+    eprintln!("  {}  http://{}/", info.paint("Web app    "), addr);
+    eprintln!("  {}  http://{}/tester", info.paint("API console"), addr);
     eprintln!(
         "  {}  http://{}/api/v1/health",
         info.paint("Health     "),
