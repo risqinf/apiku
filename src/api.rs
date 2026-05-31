@@ -678,6 +678,7 @@ pub async fn search(
     let state_clone = state.clone();
     let q_clone = qstr.to_string();
     let source_clone = q.source.clone();
+    let cache_key_for_invalidate = cache_key.clone();
     let arc = state
         .search_cache
         .try_get_with(cache_key, async move {
@@ -686,6 +687,17 @@ pub async fn search(
                 .map(Arc::new)
         })
         .await;
+
+    // Don't retain an empty result so a transient upstream failure doesn't
+    // poison the cache for the whole TTL.
+    if let Ok(ref data) = arc {
+        if data.total == 0 {
+            state
+                .search_cache
+                .invalidate(&cache_key_for_invalidate)
+                .await;
+        }
+    }
 
     match arc {
         Ok(data) => ok(
@@ -771,12 +783,55 @@ async fn run_single_search(
         Some(u) => u,
         None => return Err(format!("no search URL for source {:?}", source)),
     };
+    fetch_and_parse_html_listing(state, source, &url).await
+}
+
+/// Fetch an HTML listing page and parse it. If the parse yields zero items
+/// but the body looks like an anti-bot interstitial (Cloudflare "checking
+/// your browser", short bodies), retry once after a short delay. This makes
+/// HTML providers (Anichin, Cosplaytele, NovelID) resilient to transient
+/// "200 OK but empty" responses.
+async fn fetch_and_parse_html_listing(
+    state: &ApiState,
+    source: SearchSource,
+    url: &str,
+) -> Result<Vec<SearchResultItem>, String> {
     let html = state
         .engine
-        .fetch_html(&url)
+        .fetch_html(url)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(parse_search_html(source, &url, &html))
+    let items = parse_search_html(source, url, &html);
+    if !items.is_empty() {
+        return Ok(items);
+    }
+    // Zero items: distinguish a genuinely-empty listing from an anti-bot
+    // interstitial / truncated body. Retry once when the body looks suspect.
+    if looks_like_interstitial(&html) {
+        tracing::warn!(url = %url, bytes = html.len(), "empty HTML listing looked like an interstitial; retrying once");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let html2 = state
+            .engine
+            .fetch_html(url)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(parse_search_html(source, url, &html2));
+    }
+    Ok(items)
+}
+
+/// Heuristic: does this HTML look like an anti-bot challenge or a broken /
+/// truncated page rather than a real (possibly empty) listing?
+fn looks_like_interstitial(html: &str) -> bool {
+    if html.len() < 2000 {
+        return true;
+    }
+    let lower = html.to_lowercase();
+    lower.contains("just a moment")
+        || lower.contains("checking your browser")
+        || lower.contains("cf-browser-verification")
+        || lower.contains("attention required")
+        || lower.contains("enable javascript and cookies")
 }
 
 /// Hit the nhentai JSON search API directly. We construct browser-like
@@ -947,6 +1002,7 @@ pub async fn browse(
     let size = q.size;
     let state_clone = state.clone();
 
+    let cache_key_for_invalidate = cache_key.clone();
     let arc = state
         .search_cache
         .try_get_with(cache_key, async move {
@@ -960,6 +1016,19 @@ pub async fn browse(
             }))
         })
         .await;
+
+    // Never retain an empty result: a transient upstream hiccup (Cloudflare
+    // challenge, rate-limit) can parse to 0 items, and we don't want to
+    // poison the cache for the whole TTL. Genuinely-empty feeds are cheap to
+    // re-fetch.
+    if let Ok(ref data) = arc {
+        if data.total == 0 {
+            state
+                .search_cache
+                .invalidate(&cache_key_for_invalidate)
+                .await;
+        }
+    }
 
     match arc {
         Ok(data) => ok(StatusCode::OK, (*data).clone(), started, cached, &rid),
@@ -996,12 +1065,7 @@ async fn browse_anichin(
     page: u32,
 ) -> Result<Vec<SearchItemDto>, String> {
     let url = crate::adapters::anichin::AnichinAdapter::browse_url(feed, page);
-    let html = state
-        .engine
-        .fetch_html(&url)
-        .await
-        .map_err(|e| e.to_string())?;
-    let raw = parse_search_html(SearchSource::Anichin, &url, &html);
+    let raw = fetch_and_parse_html_listing(state, SearchSource::Anichin, &url).await?;
     Ok(raw
         .into_iter()
         .map(|r| raw_search_to_dto(state, r))
@@ -1014,12 +1078,7 @@ async fn browse_cosplaytele(
     page: u32,
 ) -> Result<Vec<SearchItemDto>, String> {
     let url = crate::adapters::cosplaytele::CosplayteleAdapter::browse_url(feed, page);
-    let html = state
-        .engine
-        .fetch_html(&url)
-        .await
-        .map_err(|e| e.to_string())?;
-    let raw = parse_search_html(SearchSource::Cosplaytele, &url, &html);
+    let raw = fetch_and_parse_html_listing(state, SearchSource::Cosplaytele, &url).await?;
     Ok(raw
         .into_iter()
         .map(|r| raw_search_to_dto(state, r))
@@ -1047,16 +1106,39 @@ async fn browse_novelid(
     page: u32,
 ) -> Result<Vec<SearchItemDto>, String> {
     let url = crate::adapters::novelid::NovelidAdapter::browse_url(feed, page);
-    let html = state
-        .engine
-        .fetch_html(&url)
-        .await
-        .map_err(|e| e.to_string())?;
-    let raw = crate::search::parse_novelid_search(&url, &html);
+    // NovelID uses the same card markup as its search results.
+    let raw = fetch_and_parse_novelid_listing(state, &url).await?;
     Ok(raw
         .into_iter()
         .map(|r| raw_search_to_dto(state, r))
         .collect())
+}
+
+/// Like `fetch_and_parse_html_listing` but for NovelID's card markup.
+async fn fetch_and_parse_novelid_listing(
+    state: &ApiState,
+    url: &str,
+) -> Result<Vec<SearchResultItem>, String> {
+    let html = state
+        .engine
+        .fetch_html(url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = crate::search::parse_novelid_search(url, &html);
+    if !items.is_empty() {
+        return Ok(items);
+    }
+    if looks_like_interstitial(&html) {
+        tracing::warn!(url = %url, bytes = html.len(), "empty NovelID listing looked like an interstitial; retrying once");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let html2 = state
+            .engine
+            .fetch_html(url)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(crate::search::parse_novelid_search(url, &html2));
+    }
+    Ok(items)
 }
 
 /// Mangaball browse: POSTs to `/api/v1/title/search/` with a `search_type`
