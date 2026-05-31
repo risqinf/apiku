@@ -25,7 +25,7 @@
 - **Adaptive runtime.** CPU and RAM are detected at startup; tokio threads, HTTP concurrency, and cache sizes are tuned automatically.
 - **Single-flight cache.** Concurrent requests for the same URL collapse into one upstream fetch.
 - **Browse + search + detail + paged chapter list** for every provider.
-- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform: home rows, per-provider browse with feed filters, search, donghua player with server switching, manga/doujin reader, novel text reader, and cosplay galleries.
+- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform: home rows, per-provider browse with feed filters, search, donghua player with server switching, manga/doujin reader, novel text reader, and cosplay galleries. Includes a light/dark theme toggle, an inline **API Explorer**, and an **18+ toggle** that hides the adult providers (Cosplay, Doujin) until explicitly enabled.
 - **Developer API console at `/tester`.** Live request playground, multi-language code examples, full reference, security notes.
 
 ---
@@ -67,7 +67,7 @@ cargo build --release
 ./target/release/apiku serve --bind 0.0.0.0:8080 --log debug --log-file apiku.log
 ```
 
-Open `http://127.0.0.1:3000/` for the **web app** — a full streaming/reading platform (browse, search, watch donghua, read manga & novels, view cosplay galleries). The developer API console lives at `http://127.0.0.1:3000/tester`. No API key required.
+Open `http://127.0.0.1:3000/` for the **web app** — a full streaming/reading platform (browse, search, watch donghua, read manga & novels, view cosplay galleries) with a light/dark theme toggle, an inline API Explorer, and an 18+ toggle. The developer API console lives at `http://127.0.0.1:3000/tester`. No API key required.
 
 ### Try it without building
 

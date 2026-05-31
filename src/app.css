@@ -1,6 +1,7 @@
 /* apiku consumer web app — dark streaming/reading theme */
 
-:root {
+:root,
+:root[data-theme="dark"] {
   --bg: #0b0e14;
   --bg-soft: #131722;
   --bg-card: #161b27;
@@ -17,6 +18,22 @@
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
   --maxw: 1280px;
   --header-h: 60px;
+}
+
+/* Light theme */
+:root[data-theme="light"] {
+  --bg: #f6f7fb;
+  --bg-soft: #eef1f7;
+  --bg-card: #ffffff;
+  --bg-elev: #eef1f7;
+  --border: #dce1ec;
+  --text: #1a2030;
+  --muted: #67718a;
+  --brand: #e8384f;
+  --brand-2: #3c63ff;
+  --accent: #d98e00;
+  --ok: #1faa5a;
+  --shadow: 0 8px 28px rgba(20, 30, 60, 0.12);
 }
 
 * { box-sizing: border-box; }
@@ -94,9 +111,9 @@ button { font-family: inherit; cursor: pointer; }
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 6px 12px;
-  min-width: 160px;
-  max-width: 320px;
-  flex: 0 1 280px;
+  min-width: 140px;
+  max-width: 300px;
+  flex: 0 1 260px;
 }
 .hdr .searchbox input {
   background: none;
@@ -107,6 +124,25 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 14px;
 }
 .hdr .searchbox svg { flex: none; opacity: .6; }
+
+/* Header icon buttons (theme + 18+) */
+.icon-btn {
+  flex: none;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.icon-btn:hover { border-color: var(--brand); }
+#adultBtn { font-size: 12px; }
+
+/* Header background adapts to theme */
+:root[data-theme="light"] .hdr { background: rgba(246, 247, 251, 0.85); }
 
 /* ---------- Layout ---------- */
 main {
@@ -378,8 +414,7 @@ main {
   display: flex;
   gap: 10px;
   padding: 12px;
-  background: rgba(11,14,20,.9);
-  backdrop-filter: blur(10px);
+  background: var(--bg-soft);
   border-top: 1px solid var(--border);
   justify-content: center;
 }
@@ -447,6 +482,52 @@ footer {
   padding: 26px 18px 40px;
 }
 footer a { color: var(--brand-2); }
+
+/* ---------- Explorer ---------- */
+.explorer {
+  max-width: 920px;
+}
+.exp-controls { margin-bottom: 16px; }
+.exp-controls select,
+.exp-controls input {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  font-size: 14px;
+  outline: none;
+}
+.exp-controls select { margin-bottom: 10px; }
+.exp-row {
+  display: flex;
+  gap: 10px;
+}
+.exp-row input { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+.exp-row .btn { flex: none; }
+.exp-meta { display: flex; gap: 8px; margin: 12px 0; min-height: 24px; }
+.exp-out {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60vh;
+  overflow: auto;
+}
+code {
+  background: var(--bg-elev);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
 
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
