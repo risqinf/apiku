@@ -2,16 +2,15 @@
 //!
 //! Wires the CLI together: argument parsing, log setup, runtime construction,
 //! and dispatch to one of the subcommands (`serve` / `scrape` / `batch` /
-//! `info`). The HTTP server lives in `server`, all REST handlers in `api`,
-//! the tester website in `tester`.
+//! `info`). The web-serving layer lives in `web` (HTTP server in
+//! `web::server`, all REST handlers in `web::api`, the consumer SPA in
+//! `web::webapp`, the developer tester website in `web::tester`).
 //!
 //! mimalloc is registered as the global allocator for faster allocation in
 //! concurrent scraping workloads.
 
 mod adapters;
-mod api;
 mod config;
-mod cossora;
 mod deep_extractor;
 mod engine;
 mod error;
@@ -23,11 +22,8 @@ mod parser;
 mod pipeline;
 mod rate_limiter;
 mod retry;
-mod search;
-mod server;
 mod sysspec;
-mod tester;
-mod webapp;
+mod web;
 
 use clap::{Parser as ClapParser, Subcommand};
 use config::AppConfig;
@@ -420,14 +416,14 @@ async fn handle_serve(bind: &str, cli: &Cli, sysspec: SysSpec) -> anyhow::Result
     };
     let engine = ScraperEngine::with_options(config, options)?;
     let codec = opaque::OpaqueCodec::from_env_or_random();
-    let state = api::ApiState::new(engine, codec, sysspec, web_config);
+    let state = web::api::ApiState::new(engine, codec, sysspec, web_config);
 
     let addr: std::net::SocketAddr = bind
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid bind '{}': {}", bind, e))?;
 
     log::banner(&addr, &sysspec);
-    server::run(state, addr, &static_dir).await
+    web::server::run(state, addr, &static_dir).await
 }
 
 /// Apply environment-variable overrides to the web/branding config.

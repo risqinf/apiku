@@ -11,13 +11,13 @@
 //!
 //! Single page, two CSS/JS files (compiled in via `include_str!`).
 
-use crate::api::{api_endpoint_docs, ApiState};
+use crate::web::api::{api_endpoint_docs, ApiState};
 use axum::extract::State;
 use axum::response::Html;
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
-const TESTER_CSS: &str = include_str!("tester.css");
-const TESTER_JS: &str = include_str!("tester.js");
+const TESTER_CSS: &str = include_str!("../../assets/tester/tester.css");
+const TESTER_JS: &str = include_str!("../../assets/tester/tester.js");
 
 /// Render the home (tester) page.
 pub async fn home(State(state): State<ApiState>) -> Html<String> {

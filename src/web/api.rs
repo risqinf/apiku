@@ -41,7 +41,7 @@ use crate::models::{
     NovelSeries, PageImage, ScrapeResult,
 };
 use crate::opaque::{Kind, OpaqueCodec, OpaqueError, Source};
-use crate::search::{
+use crate::web::search::{
     build_search_url, mangaball_search_endpoint, parse_mangaball_search, parse_nhentai_search,
     parse_search_html, SearchResultItem, SearchSource,
 };
@@ -1370,7 +1370,7 @@ async fn fetch_and_parse_novelid_listing(
         .fetch_html(url)
         .await
         .map_err(|e| e.to_string())?;
-    let items = crate::search::parse_novelid_search(url, &html);
+    let items = crate::web::search::parse_novelid_search(url, &html);
     if !items.is_empty() {
         return Ok(items);
     }
@@ -1382,7 +1382,7 @@ async fn fetch_and_parse_novelid_listing(
             .fetch_html(url)
             .await
             .map_err(|e| e.to_string())?;
-        return Ok(crate::search::parse_novelid_search(url, &html2));
+        return Ok(crate::web::search::parse_novelid_search(url, &html2));
     }
     Ok(items)
 }
@@ -1445,7 +1445,7 @@ async fn browse_mangaball(
     // Mangaball's response is `{ code: 200, data: { manga: [...] } }`. We
     // also see shapes where `data` is a flat array. Reuse the existing
     // search parser to handle both, then slice the page window.
-    let raw = crate::search::parse_mangaball_search(&body);
+    let raw = crate::web::search::parse_mangaball_search(&body);
     // Crude pagination: take items [(page-1)*size .. page*size]
     let s = size.unwrap_or(30).clamp(5, 60) as usize;
     let start = ((page.max(1) - 1) as usize) * s;
@@ -2266,7 +2266,7 @@ fn cosplay_to_dto(state: &ApiState, c: &CosplayPost, id: &str) -> CosplayPostDto
             .videos
             .iter()
             .map(|u| {
-                if crate::cossora::is_cossora_embed(u) {
+                if crate::web::cossora::is_cossora_embed(u) {
                     signed_cosplay_video_url(state, u)
                 } else {
                     u.clone()
@@ -2332,7 +2332,7 @@ pub async fn cosplay_video(
             )
         }
     };
-    if !crate::cossora::is_cossora_embed(&embed_url) {
+    if !crate::web::cossora::is_cossora_embed(&embed_url) {
         return err(
             StatusCode::BAD_REQUEST,
             "unsupported_embed",
@@ -2355,7 +2355,7 @@ pub async fn cosplay_video(
             )
         }
     };
-    let master = match crate::cossora::resolve_master_from_html(&html) {
+    let master = match crate::web::cossora::resolve_master_from_html(&html) {
         Some(m) => m,
         None => {
             return err(

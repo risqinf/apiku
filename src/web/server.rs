@@ -21,9 +21,9 @@
 //!   GET /api/v1/nhentai/chapter/{id} -> nhentai gallery as a chapter
 //!   GET /img                         -> HMAC-signed image proxy
 
-use crate::api::{self, ApiState};
-use crate::tester;
-use crate::webapp;
+use crate::web::api::{self, ApiState};
+use crate::web::tester;
+use crate::web::webapp;
 use axum::extract::Path as AxumPath;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};

@@ -28,6 +28,37 @@
     return html ? `<div class="ad-slot" data-slot="${escAttr(name)}">${html}</div>` : "";
   }
 
+  // ---- Lite mode (very old / low-end devices) -----------------------------
+  // Detect weak hardware or a data-saving / reduced-motion preference, then
+  // run a stripped-down experience: all CSS animations & transitions off
+  // (see [data-lite] rules in app.css) and no background prefetch (saves RAM,
+  // CPU and bandwidth on a 2008 PC or a 2015 phone). The user can still force
+  // it on/off; the choice is remembered.
+  const LITE = (function detectLite(){
+    let forced = null;
+    try { forced = localStorage.getItem("apiku_lite"); } catch(_){}
+    if(forced === "1") return true;
+    if(forced === "0") return false;
+    const mem = navigator.deviceMemory;            // GiB, where exposed
+    const cpu = navigator.hardwareConcurrency;     // logical cores
+    const conn = navigator.connection || {};
+    const saveData = conn.saveData === true;
+    const slowNet = /(^|\b)(2g|slow-2g)$/i.test(conn.effectiveType || "");
+    const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduceData = window.matchMedia && matchMedia("(prefers-reduced-data: reduce)").matches;
+    return (typeof mem === "number" && mem <= 2)
+        || (typeof cpu === "number" && cpu <= 2)
+        || saveData || slowNet || reduceData || reduceMotion;
+  })();
+  if(LITE){ try { document.documentElement.setAttribute("data-lite", "1"); } catch(_){} }
+
+  // Persist + apply a manual lite-mode choice, then reload so every render
+  // path picks up the new setting cleanly.
+  function setLite(on){
+    try { localStorage.setItem("apiku_lite", on ? "1" : "0"); } catch(_){}
+    location.reload();
+  }
+
   // ---- HLS playback (cosplay videos) --------------------------------------
   // Lazily load hls.js from a CDN once, then reuse.
   let _hlsLoading = null;
@@ -101,6 +132,7 @@
     moon:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
     menu:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>',
     dots:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
+    bolt:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
     close:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     play:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
     book:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M6 17h13"/></svg>',
@@ -180,6 +212,7 @@
   }
   // Queue one or more API paths to warm in the background (deduped).
   function prefetch(paths){
+    if(LITE) return; // skip speculative work on weak devices
     (Array.isArray(paths)?paths:[paths]).forEach(p=>{
       if(p && !_cache.has(p) && !_inflight.has(p) && !_idleQ.includes(p)) _idleQ.push(p);
     });
@@ -303,6 +336,10 @@
             <span class="switch-label">${themeIco}<span>Mode gelap</span></span>
             <span class="switch-track"><span class="switch-thumb"></span></span>
           </button>
+          <button class="switch ${LITE?"on":""}" id="liteBtnD" role="switch" aria-checked="${LITE}">
+            <span class="switch-label">${I.bolt||""}<span>Mode ringan</span></span>
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </button>
         </div>
       </aside>
 
@@ -380,6 +417,10 @@
     };
     if(adultBtn) adultBtn.onclick = toggleAdult;
     if(adultBtnD) adultBtnD.onclick = toggleAdult;
+
+    // lite mode — toggle + persist, then reload to re-render cleanly
+    const liteBtnD = document.getElementById("liteBtnD");
+    if(liteBtnD) liteBtnD.onclick = ()=> setLite(!LITE);
 
     // drawer
     const drawer = document.getElementById("drawer");
@@ -1038,6 +1079,7 @@
 
   // route dispatch is defined in part 2 (appended)
   window.__apiku = { shell, setView, viewEl, h, qs, api, apiRaw, apiCached, prefetch, spinner, go, I,
+    LITE, setLite,
     routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeWatchAnime, routeRead };
 })();
 

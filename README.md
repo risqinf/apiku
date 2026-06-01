@@ -12,7 +12,7 @@
 - **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
 - **Author:** [@risqinf](https://github.com/risqinf)
 - **License:** MIT
-- **Version:** 0.2.2 (see `Cargo.toml`)
+- **Version:** 0.2.3 (see `Cargo.toml`)
 
 ---
 
@@ -1096,21 +1096,19 @@ Sample colourised output:
 ## Project layout
 
 ```
+assets/                Front-end assets, compiled into the binary via include_str!
+├── webapp/
+│   ├── app.css        Consumer web app stylesheet
+│   └── app.js         Consumer web app SPA router + views
+└── tester/
+    ├── tester.css     Developer API console stylesheet
+    └── tester.js      Developer API console client-side script
+
 src/
 ├── main.rs            CLI entry point, argument parsing, runtime setup
 ├── log.rs             Coloured tracing-subscriber setup, banner
-├── api.rs             REST handlers, DTOs, response envelopes, browse + paging
-├── server.rs          axum router, middleware (request-id, CORS, compression)
-├── tester.rs          Developer API console (maud), embedded CSS/JS
-├── tester.css         API console stylesheet (compiled in)
-├── tester.js          API console client-side script (compiled in)
-├── webapp.rs          Consumer streaming/reading SPA shell
-├── app.css            Web app stylesheet (compiled in)
-├── app.js             Web app SPA router + views (compiled in)
 ├── opaque.rs          HMAC-SHA256 opaque ID + image-proxy signing
-├── cossora.rs         Cosplaytele video resolver (AES-256-CBC decrypt of cossora.stream embeds -> HLS)
 ├── fingerprint.rs     Browser fingerprint catalogue (Win/macOS/Linux/Android/iOS)
-├── search.rs          Cross-provider search abstraction
 ├── sysspec.rs         CPU/RAM detection and tuning
 ├── engine.rs          Scraping orchestrator (used by CLI and API)
 ├── pipeline.rs        Outbound request header pipeline
@@ -1121,6 +1119,14 @@ src/
 ├── models.rs          Domain models (ContentModel and friends)
 ├── error.rs           ScraperError variants
 ├── config.rs          TOML configuration loading + validation
+├── web/               HTTP-serving layer (separate from engine internals)
+│   ├── mod.rs         Web module registry
+│   ├── server.rs      axum router, middleware (request-id, CORS, compression)
+│   ├── api.rs         REST handlers, DTOs, response envelopes, browse + paging
+│   ├── webapp.rs      Consumer streaming/reading SPA shell
+│   ├── tester.rs      Developer API console (maud)
+│   ├── search.rs      Cross-provider search abstraction + relevance ranking
+│   └── cossora.rs     Cosplaytele video resolver (AES-256-CBC decrypt -> HLS)
 └── adapters/
     ├── mod.rs         SiteAdapter trait + registry
     ├── mangaball.rs   Mangaball SPA adapter (multi-step API + browse search_types)
@@ -1153,13 +1159,15 @@ Planned work, roughly in priority order. Contributions and suggestions welcome v
 
 ### Done
 
+- [x] **Performance pass for low-end devices (0.2.3)** — lightweight static background (no animated orbs / blur / blend modes), automatic "lite mode" on weak hardware (<=2 GiB RAM / <=2 cores, data-saver, 2G, or reduced-motion) that disables animations and background prefetch, plus a manual toggle. Targets a 2008 PC or a 2015 phone.
+- [x] **Tidier project layout (0.2.3)** — front-end assets split into `assets/webapp` + `assets/tester`; HTTP-serving code grouped under `src/web`, kept separate from the engine and adapters.
 - [x] **Stream Anime (Otakudesu)** — full anime streaming provider: search, rich detail metadata, episode list, quality-grouped streaming mirrors resolved on demand, downloads, and genre feeds.
 - [x] Cosplay video playback via server-side HLS resolution (no iframe embeds).
 - [x] High-precision Cosplaytele search + clickable cosplayer/tag pills.
 - [x] Relevance-ranked cross-provider search with per-source filter counts.
 - [x] Configurable branding (name/tagline/logo/footer/ads) via config + env, with logo auto-detection.
 - [x] Reworked API Explorer with grouped endpoints and copy-ready multi-language samples.
-- [x] Modern UI: animated background, real-time toggle switches, light/dark theme, overflow nav menu.
+- [x] Clean light/dark theme with real-time toggle switches and an overflow nav menu.
 - [x] Full episode lists for donghua, language-grouped manga chapters, NovelID upstream pagination.
 
 ---

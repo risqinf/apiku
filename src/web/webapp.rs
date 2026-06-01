@@ -13,12 +13,12 @@
 //! snippets, and ad slots are injected from `[web]` config at runtime, so
 //! operators can rebrand and monetize without recompiling.
 
-use crate::api::ApiState;
+use crate::web::api::ApiState;
 use axum::extract::State;
 use axum::response::Html;
 
-const APP_CSS: &str = include_str!("app.css");
-const APP_JS: &str = include_str!("app.js");
+const APP_CSS: &str = include_str!("../../assets/webapp/app.css");
+const APP_JS: &str = include_str!("../../assets/webapp/app.js");
 
 /// HTML-escape a string for safe interpolation into attributes / text.
 fn esc(s: &str) -> String {
@@ -107,7 +107,6 @@ pub async fn index(State(state): State<ApiState>) -> Html<String> {
         r##"</style>
 </head>
 <body>
-<div class="bg-fx" aria-hidden="true"><span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span><span class="grid-lines"></span><span class="grid-wrap"><span class="grid-sweep h"></span><span class="grid-sweep v"></span></span></div>
 <div id="app"><div class="boot">Loading...</div></div>
 {brand}
 <script>"##,

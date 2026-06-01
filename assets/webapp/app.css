@@ -25,12 +25,10 @@
   --header-h: 66px;
   --grad: linear-gradient(120deg, var(--brand), var(--brand-2) 55%, var(--brand-3));
   --grad-soft: linear-gradient(120deg, color-mix(in srgb, var(--brand) 22%, transparent), color-mix(in srgb, var(--brand-3) 22%, transparent));
-  /* richer aurora mesh background */
+  /* lightweight static gradient wash (cheap to paint, no animation) */
   --mesh:
-    radial-gradient(42% 50% at 12% 6%, rgba(108,140,255,0.28), transparent 60%),
-    radial-gradient(40% 44% at 88% 4%, rgba(255,107,166,0.22), transparent 60%),
-    radial-gradient(46% 50% at 70% 36%, rgba(160,107,255,0.18), transparent 62%),
-    radial-gradient(55% 55% at 40% 100%, rgba(61,220,145,0.10), transparent 60%);
+    radial-gradient(50% 60% at 8% 0%, rgba(108,140,255,0.16), transparent 60%),
+    radial-gradient(45% 55% at 95% 2%, rgba(255,107,166,0.12), transparent 60%);
   --grid-line: rgba(255,255,255,0.025);
 }
 
@@ -55,10 +53,8 @@
   --grad: linear-gradient(120deg, var(--brand), var(--brand-2) 55%, var(--brand-3));
   --grad-soft: linear-gradient(120deg, color-mix(in srgb, var(--brand) 14%, transparent), color-mix(in srgb, var(--brand-3) 14%, transparent));
   --mesh:
-    radial-gradient(42% 50% at 10% 4%, rgba(59,98,255,0.16), transparent 60%),
-    radial-gradient(40% 44% at 90% 4%, rgba(255,61,134,0.13), transparent 60%),
-    radial-gradient(46% 50% at 72% 34%, rgba(139,60,255,0.12), transparent 62%),
-    radial-gradient(55% 55% at 40% 100%, rgba(15,164,90,0.07), transparent 60%);
+    radial-gradient(50% 60% at 8% 0%, rgba(59,98,255,0.10), transparent 60%),
+    radial-gradient(45% 55% at 95% 2%, rgba(255,61,134,0.08), transparent 60%);
   --grid-line: rgba(30,50,100,0.045);
 }
 
@@ -73,126 +69,21 @@ html, body {
   font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
 }
-html { scroll-behavior: smooth; }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
-/* Fixed aurora background layer (slow animated drift) */
+/* Lightweight static background: a single fixed gradient wash, no animation,
+   no blur, no blend modes. Cheap to paint and never repaints on scroll, so it
+   stays smooth even on low-end / integrated-GPU devices. */
 body::before {
   content: "";
   position: fixed;
-  inset: -20% -20% -20% -20%;
-  z-index: -3;
+  inset: 0;
+  z-index: -1;
   background: var(--mesh), var(--bg);
-  background-attachment: fixed;
-  animation: meshDrift 26s ease-in-out infinite alternate;
-  will-change: transform;
-}
-@keyframes meshDrift {
-  0%   { transform: translate3d(0, 0, 0) scale(1); }
-  50%  { transform: translate3d(-2.5%, 1.8%, 0) scale(1.06); }
-  100% { transform: translate3d(2.2%, -2.2%, 0) scale(1.04); }
-}
-@media (prefers-reduced-motion: reduce) {
-  body::before { animation: none; }
-}
-
-/* Animated floating orbs + grid live in a fixed backdrop element. */
-.bg-fx {
-  position: fixed;
-  inset: 0;
-  z-index: -2;
-  overflow: hidden;
   pointer-events: none;
-  /* Promote to its own GPU layer so it never repaints during page scroll. */
-  transform: translateZ(0);
-  contain: strict;
 }
-.bg-fx .grid-lines {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
-  background-size: 54px 54px;
-  -webkit-mask-image: radial-gradient(circle at 50% 0%, #000 0%, transparent 78%);
-          mask-image: radial-gradient(circle at 50% 0%, #000 0%, transparent 78%);
-  animation: gridPan 40s linear infinite;
-}
-@keyframes gridPan {
-  to { background-position: 54px 54px; }
-}
-.bg-fx .orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(70px);
-  opacity: .5;
-  mix-blend-mode: screen;
-  will-change: transform;
-}
-.bg-fx .orb.o1 { width: 46vw; height: 46vw; left: -8vw; top: -6vw; background: radial-gradient(circle, var(--brand), transparent 70%); animation: float1 22s ease-in-out infinite; }
-.bg-fx .orb.o2 { width: 40vw; height: 40vw; right: -6vw; top: -4vw; background: radial-gradient(circle, var(--brand-3), transparent 70%); animation: float2 28s ease-in-out infinite; }
-.bg-fx .orb.o3 { width: 52vw; height: 52vw; left: 24vw; bottom: -20vw; background: radial-gradient(circle, var(--brand-2), transparent 70%); animation: float3 32s ease-in-out infinite; }
-:root[data-theme="light"] .bg-fx .orb { opacity: .35; mix-blend-mode: multiply; }
-
-/* Premium-keyboard style color flow over the grid lines.
-   Reliable technique: a STATIC mask punches the grid-line shape, while a
-   multi-color brand gradient flows behind it via an animated
-   `background-position` (which repaints reliably on all browsers, unlike
-   animating mask-position). Result: the grid lines themselves cycle color,
-   flowing left->right (vertical lines) and top->bottom (horizontal lines).
-   Colors use the theme brand palette so it matches light & dark. */
-.bg-fx .grid-wrap {
-  position: absolute; inset: 0;
-  -webkit-mask-image: radial-gradient(circle at 50% 0%, #000 0%, transparent 82%);
-          mask-image: radial-gradient(circle at 50% 0%, #000 0%, transparent 82%);
-  mix-blend-mode: screen;
-  opacity: .8;
-}
-:root[data-theme="light"] .bg-fx .grid-wrap { mix-blend-mode: normal; opacity: .6; }
-.bg-fx .grid-sweep { position: absolute; inset: 0; will-change: background-position; }
-/* vertical lines, colors flowing left->right */
-.bg-fx .grid-sweep.v {
-  background-image: linear-gradient(90deg,
-    var(--brand), var(--brand-2), var(--brand-3), var(--brand-2), var(--brand));
-  background-size: 200% 100%;
-  -webkit-mask-image: linear-gradient(to right, #000 1.5px, transparent 1.5px);
-          mask-image: linear-gradient(to right, #000 1.5px, transparent 1.5px);
-  -webkit-mask-size: 54px 54px; mask-size: 54px 54px;
-  -webkit-mask-repeat: repeat; mask-repeat: repeat;
-  animation: flowX 9s linear infinite;
-}
-/* horizontal lines, colors flowing top->bottom */
-.bg-fx .grid-sweep.h {
-  background-image: linear-gradient(180deg,
-    var(--brand-3), var(--brand), var(--brand-2), var(--brand), var(--brand-3));
-  background-size: 100% 200%;
-  -webkit-mask-image: linear-gradient(to bottom, #000 1.5px, transparent 1.5px);
-          mask-image: linear-gradient(to bottom, #000 1.5px, transparent 1.5px);
-  -webkit-mask-size: 54px 54px; mask-size: 54px 54px;
-  -webkit-mask-repeat: repeat; mask-repeat: repeat;
-  animation: flowY 12s linear infinite;
-}
-@keyframes flowX {
-  from { background-position: 0 0; }
-  to   { background-position: 200% 0; }
-}
-@keyframes flowY {
-  from { background-position: 0 0; }
-  to   { background-position: 0 200%; }
-}
-@media (prefers-reduced-motion: reduce) {
-  /* Respect reduced motion: stop the flow but keep the colored grid visible
-     (static), instead of hiding it entirely. */
-  .bg-fx .grid-sweep { animation: none; }
-}
-@keyframes float1 { 0%,100% { transform: translate(0,0); } 50% { transform: translate(6vw, 5vh); } }
-@keyframes float2 { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-7vw, 6vh); } }
-@keyframes float3 { 0%,100% { transform: translate(0,0); } 50% { transform: translate(4vw, -6vh); } }
-@media (prefers-reduced-motion: reduce) {
-  .bg-fx .orb, .bg-fx .grid-lines { animation: none; }
-}
+/* The old animated `.bg-fx` element (if still emitted) is hidden. */
+.bg-fx { display: none !important; }
 
 a { color: inherit; text-decoration: none; }
 img { display: block; max-width: 100%; }
@@ -211,9 +102,7 @@ svg { display: block; }
   align-items: center;
   gap: 12px;
   padding: 0 18px;
-  background: color-mix(in srgb, var(--bg) 78%, transparent);
-  backdrop-filter: saturate(160%) blur(14px);
-  -webkit-backdrop-filter: saturate(160%) blur(14px);
+  background: var(--bg-soft);
   border-bottom: 1px solid var(--border-soft);
 }
 .brand {
@@ -300,7 +189,7 @@ svg { display: block; }
   transition: border-color .16s, box-shadow .16s;
 }
 .searchbox:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 22%, transparent); }
-.searchbox input { background: none; border: none; outline: none; color: var(--text); width: 100%; font-size: 14px; }
+.searchbox input { background: none; border: none; outline: none; color: var(--text); width: 100%; font-size: 16px; }
 .searchbox svg { flex: none; opacity: .6; width: 16px; height: 16px; }
 
 .icon-btn {
@@ -333,7 +222,6 @@ svg { display: block; }
   inset: 0;
   z-index: 70;
   background: rgba(0,0,0,.5);
-  backdrop-filter: blur(2px);
   opacity: 0;
   pointer-events: none;
   transition: opacity .2s;
@@ -456,8 +344,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 24px 18px 90px; }
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  backdrop-filter: blur(6px);
-  transition: color .15s, border-color .15s, background .15s, transform .12s;
+  transition: color .15s, border-color .15s, background .15s;
 }
 .chip:hover { color: var(--text); border-color: var(--brand); transform: translateY(-1px); }
 .chip.active { background: linear-gradient(120deg, var(--brand), var(--brand-2)); color: #fff; border-color: transparent; box-shadow: 0 4px 14px color-mix(in srgb, var(--brand) 35%, transparent); }
@@ -505,7 +392,6 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 24px 18px 90px; }
   font-weight: 700;
   padding: 4px 9px;
   border-radius: 7px;
-  backdrop-filter: blur(4px);
   z-index: 1;
 }
 .card .badge.src { right: 9px; left: auto; background: linear-gradient(120deg, var(--brand), var(--brand-2)); }
@@ -608,7 +494,7 @@ a.pill.link:hover { color: #fff; background: linear-gradient(120deg, var(--brand
 /* ---------- Reader (manga pages) ---------- */
 .reader-shell { background: var(--bg); }
 .reader-shell:fullscreen { background: var(--bg); overflow-y: auto; padding: 0; }
-.reader-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: var(--header-h); z-index: 5; padding: 10px 0; margin-bottom: 8px; background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(8px); }
+.reader-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: var(--header-h); z-index: 5; padding: 10px 0; margin-bottom: 8px; background: var(--bg); }
 .reader-shell:fullscreen .reader-bar { top: 0; padding: 10px 16px; }
 .reader-bar .reader-title { font-weight: 800; font-size: 16px; letter-spacing: -0.3px; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .reader-bar .reader-title::before { content: ""; width: 9px; height: 22px; border-radius: 4px; background: linear-gradient(var(--brand), var(--brand-2)); flex: none; }
@@ -616,7 +502,7 @@ a.pill.link:hover { color: #fff; background: linear-gradient(120deg, var(--brand
 .reader-shell:fullscreen .reader { max-width: 1000px; padding: 0 8px 40px; }
 /* Natural page sizing: do not force a ratio; just cap min-height while loading. */
 .reader img { width: 100%; height: auto; margin: 0 auto 3px; background: var(--bg-elev); border-radius: 2px; }
-.reader-nav { position: sticky; bottom: 0; display: flex; gap: 10px; padding: 12px; background: color-mix(in srgb, var(--bg) 80%, transparent); backdrop-filter: blur(10px); border-top: 1px solid var(--border); justify-content: center; }
+.reader-nav { position: sticky; bottom: 0; display: flex; gap: 10px; padding: 12px; background: var(--bg-soft); border-top: 1px solid var(--border); justify-content: center; }
 .reader-shell:fullscreen .reader-nav { padding: 12px 16px; }
 
 /* ---------- Novel reader ---------- */
@@ -780,7 +666,7 @@ footer a { color: var(--brand); }
 .modal-scrim {
   position: fixed; inset: 0; z-index: 90;
   display: grid; place-items: center; padding: 20px;
-  background: rgba(0,0,0,.6); backdrop-filter: blur(4px);
+  background: rgba(0,0,0,.6);
   opacity: 0; pointer-events: none; transition: opacity .2s;
 }
 .modal-scrim.open { opacity: 1; pointer-events: auto; }
@@ -827,7 +713,16 @@ code { background: var(--bg-elev); border-radius: 5px; padding: 1px 6px; font-fa
 @media (max-width: 860px) {
   .hdr nav.desktop { display: none; }
   .hamburger { display: inline-flex; }
-  .searchbox { flex: 1; }
+  .hdr { gap: 8px; padding: 0 12px; }
+  .searchbox { flex: 1 1 auto; min-width: 0; flex-basis: 0; }
+}
+/* Small / older phones: keep only hamburger + brand + search in the bar.
+   Theme & 18+ live in the drawer, so the search field always has room and
+   stays tappable. */
+@media (max-width: 560px) {
+  .hdr .brand b { display: none; }              /* logo mark only */
+  #adultBtn, #themeBtn { display: none; }
+  .searchbox { padding: 9px 12px; }
 }
 @media (max-width: 720px) {
   .detail-hero { flex-direction: column; }
@@ -847,3 +742,32 @@ code { background: var(--bg-elev); border-radius: 5px; padding: 1px 6px; font-fa
 @media (min-width: 861px) {
   .drawer, .drawer-scrim { display: none; }
 }
+
+/* ---------- Lite mode (very old / low-end devices) ----------
+   Activated by app.js when it detects weak hardware (<=2 GiB RAM / <=2 cores),
+   a data-saver / 2G connection, or a reduced-motion/data preference. It kills
+   every animation, transition and transform-based hover so a 2008 PC or a
+   2015 phone paints once and stays still while scrolling. The user can force
+   it on/off (remembered in localStorage). */
+html[data-lite] *,
+html[data-lite] *::before,
+html[data-lite] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+/* Drop transform/scale/translate hover effects (they trigger repaints). */
+html[data-lite] .card:hover,
+html[data-lite] .card:hover .poster img,
+html[data-lite] .chip:hover,
+html[data-lite] .ep-btn:hover,
+html[data-lite] .thumb:hover .poster,
+html[data-lite] .btn:active { transform: none !important; }
+/* The hover gradient overlay + image zoom are pure eye-candy: hide them. */
+html[data-lite] .card .poster::after { display: none !important; }
+/* Replace the shimmer skeleton with a flat block (no animated gradient). */
+html[data-lite] .skeleton { background: var(--bg-card) !important; }
+/* Static spinner ring instead of a spinning one. */
+html[data-lite] .spinner { animation: none !important; border-top-color: var(--brand); }
+/* Even cheaper background: a flat fill, no gradient wash to composite. */
+html[data-lite] body::before { background: var(--bg) !important; }
