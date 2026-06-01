@@ -45,6 +45,7 @@ pub enum Source {
     Cosplaytele,
     Nhentai,
     Novelid,
+    Otakudesu,
 }
 
 impl Source {
@@ -55,6 +56,7 @@ impl Source {
             Source::Cosplaytele => "ct",
             Source::Nhentai => "nh",
             Source::Novelid => "nv",
+            Source::Otakudesu => "od",
         }
     }
 
@@ -65,6 +67,7 @@ impl Source {
             "ct" => Some(Self::Cosplaytele),
             "nh" => Some(Self::Nhentai),
             "nv" => Some(Self::Novelid),
+            "od" => Some(Self::Otakudesu),
             _ => None,
         }
     }
@@ -83,6 +86,8 @@ impl Source {
             Some(Self::Nhentai)
         } else if u.contains("novelid.org") {
             Some(Self::Novelid)
+        } else if u.contains("otakudesu.") {
+            Some(Self::Otakudesu)
         } else {
             None
         }

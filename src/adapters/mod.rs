@@ -77,6 +77,7 @@ pub mod manga;
 pub mod mangaball;
 pub mod nhentai;
 pub mod novelid;
+pub mod otakudesu;
 pub mod wordpress;
 
 /// Registry of site adapters
@@ -100,6 +101,7 @@ impl AdapterRegistry {
         registry.register(Box::new(novelid::NovelidAdapter::new()));
         registry.register(Box::new(cosplaytele::CosplayteleAdapter::new()));
         registry.register(Box::new(anichin::AnichinAdapter::new()));
+        registry.register(Box::new(otakudesu::OtakudesuAdapter::new()));
         registry.register(Box::new(wordpress::WordPressAdapter::new()));
         registry.register(Box::new(manga::MangaAdapter::new()));
         registry.register(Box::new(donghua::DonghuaAdapter::new()));

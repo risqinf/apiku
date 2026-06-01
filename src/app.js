@@ -89,6 +89,7 @@
   const I = {
     home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>',
     donghua:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="3"/><path d="m10 9 5 3-5 3z" fill="currentColor"/><path d="M8 21h8"/></svg>',
+    anime:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8l8-5 8 5v8l-8 5-8-5z"/><path d="m10 10 4 2-4 2z" fill="currentColor"/></svg>',
     manga:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5a2 2 0 0 1 2-2h6v18H5a2 2 0 0 1-2-2z"/><path d="M21 5a2 2 0 0 0-2-2h-6v18h6a2 2 0 0 0 2-2z"/></svg>',
     novel:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h13a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
     cosplay:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>',
@@ -99,6 +100,7 @@
     sun:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
     moon:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
     menu:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>',
+    dots:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
     close:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     play:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
     book:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M6 17h13"/></svg>',
@@ -109,6 +111,7 @@
 
   // ---- Provider config ---------------------------------------------------
   const PROVIDERS = {
+    anime:   { label: "Anime",   api: "otakudesu",   kind: "anime",   adult: false, icon: I.anime },
     donghua: { label: "Donghua", api: "anichin",     kind: "donghua", adult: false, icon: I.donghua },
     manga:   { label: "Komik",   api: "mangaball",   kind: "manga",   adult: false, icon: I.manga },
     novel:   { label: "Novel",   api: "novelid",     kind: "novel",   adult: false, icon: I.novel },
@@ -118,14 +121,15 @@
   const EPISODE_SIZE = 5000; // donghua: fetch the whole episode list at once
 
   const FEEDS = {
+    otakudesu:   [["ongoing","Ongoing"],["complete","Completed"],["action","Action"],["romance","Romance"],["comedy","Comedy"],["fantasy","Fantasy"],["adventure","Adventure"],["drama","Drama"]],
     anichin:     [["home","Terbaru"],["popular","Populer"],["rating","Rating"],["title","A-Z"]],
     mangaball:   [["home","Unggulan"],["popular","Populer"],["latest","Terbaru"],["recommend","Rekomendasi"]],
-    novelid:     [["home","Semua"],["popular","Tamat"],["novel-translate","Translate"],["fantasi","Fantasi"],["romantis","Romantis"],["aksi","Aksi"],["horror","Horror"]],
+    novelid:     [["home","All"],["popular","Completed"],["novel-translate","Translated"],["fantasi","Fantasy"],["romantis","Romance"],["aksi","Action"],["horror","Horror"]],
     cosplaytele: [["home","Terbaru"],["popular","Populer"]],
     nhentai:     [["popular-today","Hari Ini"],["popular-week","Minggu Ini"],["popular","Sepanjang Masa"],["home","Terbaru"]],
   };
 
-  const DETAIL_EP = { donghua:"donghua", manga:"manga", novel:"novel", cosplay:"cosplay", doujin:"nhentai" };
+  const DETAIL_EP = { anime:"anime", donghua:"donghua", manga:"manga", novel:"novel", cosplay:"cosplay", doujin:"nhentai" };
 
   // ---- Preferences --------------------------------------------------------
   const store = {
@@ -190,19 +194,21 @@
 
   function imgTag(url, _cls, alt){
     if(!url) return `<div class="ph">${h(alt||"no image")}</div>`;
-    return `<img loading="lazy" referrerpolicy="no-referrer" src="${h(url)}" alt="${h(alt||"")}" onerror="this.parentNode.innerHTML='<div class=ph>no image</div>'">`;
+    return `<img loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${h(url)}" alt="${h(alt||"")}" onerror="this.parentNode.innerHTML='<div class=ph>no image</div>'">`;
   }
   // Natural-ratio image: lets the browser size by the real image dimensions
   // (used for cosplay/doujin galleries where not everything is 2:3).
   function imgNatural(url, alt){
     if(!url) return `<div class="ph">${h(alt||"no image")}</div>`;
-    return `<img class="nat" loading="lazy" referrerpolicy="no-referrer" src="${h(url)}" alt="${h(alt||"")}" onerror="this.style.display='none'">`;
+    return `<img class="nat" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${h(url)}" alt="${h(alt||"")}" onerror="this.style.display='none'">`;
   }
 
   // ---- Shell --------------------------------------------------------------
+  // Primary content providers shown directly in the desktop nav bar.
   function navLinks(){
     const items = [
       ["home", "#/", "Home", I.home, false],
+      ["anime", "#/browse/anime", "Anime", I.anime, false],
       ["donghua", "#/browse/donghua", "Donghua", I.donghua, false],
       ["manga", "#/browse/manga", "Komik", I.manga, false],
       ["novel", "#/browse/novel", "Novel", I.novel, false],
@@ -211,9 +217,15 @@
       items.push(["cosplay", "#/browse/cosplay", "Cosplay", I.cosplay, true]);
       items.push(["doujin", "#/browse/doujin", "Doujin", I.doujin, true]);
     }
-    items.push(["docs", "#/docs", "API Docs", I.docs, false]);
-    items.push(["explorer", "#/explorer", "Explorer", I.explorer, false]);
     return items;
+  }
+  // Developer tools — tucked into an overflow menu on desktop to keep the bar
+  // uncluttered, listed in full in the mobile drawer.
+  function toolLinks(){
+    return [
+      ["docs", "#/docs", "API Docs", I.docs, false],
+      ["explorer", "#/explorer", "Explorer", I.explorer, false],
+    ];
   }
   // Render a nav link; adult items get a red "18+" badge.
   function navItem(s, href, label, ico, adult, seg){
@@ -228,8 +240,9 @@
     switch(seg){
       case "": case "home": return "home";
       case "browse": return parts[1] || "";
-      case "detail": return parts[1] || "";          // kind: donghua/manga/novel/cosplay/doujin
+      case "detail": return parts[1] || "";          // kind: anime/donghua/manga/novel/cosplay/doujin
       case "watch":  return "donghua";
+      case "watchanime": return "anime";
       case "read":   return parts[1] === "nhentai" ? "doujin" : (parts[1] || "");
       case "docs":   return "docs";
       case "explorer": return "explorer";
@@ -264,6 +277,7 @@
   function shell(inner){
     const seg = activeNavSeg();
     const links = navLinks();
+    const tools = toolLinks();
     const themeIco = store.theme === "dark" ? I.sun : I.moon;
 
     app.innerHTML = `
@@ -275,6 +289,9 @@
         </div>
         <nav>
           ${links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
+          <div class="dsep"></div>
+          ${tools.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
+          <a href="/tester"><span>${I.explorer}</span><span>Dev Console</span></a>
         </nav>
         <div class="dsep"></div>
         <div class="drow">
@@ -294,6 +311,13 @@
         <a class="brand" href="#/">${brandMark()}</a>
         <nav class="desktop">
           ${links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
+          <div class="navmore">
+            <button class="navmore-btn ${tools.some(t=>t[0]===seg)?"active":""}" id="moreBtn" aria-haspopup="true" aria-expanded="false">${I.dots}</button>
+            <div class="navmore-menu" id="moreMenu">
+              ${tools.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
+              <a href="/tester">${I.explorer}<span>Dev Console</span></a>
+            </div>
+          </div>
         </nav>
         <div class="spacer"></div>
         <form class="searchbox" id="searchform">
@@ -366,6 +390,21 @@
     document.getElementById("drawerClose").onclick = closeDrawer;
     scrim.onclick = closeDrawer;
     drawer.querySelectorAll("nav a").forEach(a => a.addEventListener("click", closeDrawer));
+
+    // desktop "More" overflow menu (tools)
+    const moreBtn = document.getElementById("moreBtn");
+    const moreMenu = document.getElementById("moreMenu");
+    if(moreBtn && moreMenu){
+      const closeMore = ()=>{ moreMenu.classList.remove("open"); moreBtn.setAttribute("aria-expanded","false"); document.removeEventListener("click", onDocClick); };
+      const onDocClick = (e)=>{ if(!moreMenu.contains(e.target) && e.target!==moreBtn && !moreBtn.contains(e.target)) closeMore(); };
+      moreBtn.onclick = (e)=>{
+        e.stopPropagation();
+        const open = moreMenu.classList.toggle("open");
+        moreBtn.setAttribute("aria-expanded", String(open));
+        if(open) setTimeout(()=>document.addEventListener("click", onDocClick),0);
+      };
+      moreMenu.querySelectorAll("a").forEach(a => a.addEventListener("click", closeMore));
+    }
   }
 
   // ---- Cards --------------------------------------------------------------
@@ -418,6 +457,7 @@
     `);
     const rows = document.getElementById("rows");
     let sections = [
+      { title:"Anime Ongoing",   prov:"otakudesu",   feed:"ongoing",       seg:"anime" },
       { title:"Donghua Terbaru", prov:"anichin",     feed:"home",          seg:"donghua" },
       { title:"Komik Populer",   prov:"mangaball",   feed:"popular",       seg:"manga" },
       { title:"Novel Terbaru",   prov:"novelid",     feed:"home",          seg:"novel" },
@@ -462,47 +502,62 @@
   }
 
   // Search with a source filter (grouped, not all-at-once clutter)
-  async function routeSearch(query, src){
+  async function routeSearch(query, src, mode){
     src = src || "all";
+    const locked = mode === "lock"; // came from a cosplayer/tag pill (precise)
     shell(`
       <div class="row-head"><h2><span class="dot"></span>Hasil: &ldquo;${h(query)}&rdquo;</h2></div>
       <div class="chips" id="srcChips"></div>
       <div id="list">${skelGrid(12)}</div>
     `);
-    const allSources = [["all","Semua"],["donghua","Donghua"],["manga","Komik"],["novel","Novel"]];
+    const allSources = [["all","Semua"],["anime","Anime"],["donghua","Donghua"],["manga","Komik"],["novel","Novel"]];
     if(adultOn()){ allSources.push(["cosplay","Cosplay"]); allSources.push(["doujin","Doujin"]); }
-    // If a specific source is locked (e.g. via clicking a cosplayer/tag),
-    // query the backend for THAT source directly so we get high-precision
-    // results (cosplay relevance filter, doujin tag matching) instead of the
-    // broad cross-provider list.
     if(src!=="all" && !providerVisible(src)) src = "all";
     try{
-      const data = await apiCached(`/search?${qs({q:query, source:src, page:1})}`);
+      if(locked && src!=="all"){
+        // Locked single-source mode (tag/name pill): high precision, only this
+        // provider's results, minimal chips.
+        const data = await apiCached(`/search?${qs({q:query, source:src, page:1})}`);
+        const items = (data.items||[]).filter(it=>providerVisible(it.kind));
+        const label = (allSources.find(([v])=>v===src)||[src,src])[1];
+        const chips = document.getElementById("srcChips");
+        chips.innerHTML =
+          `<button class="chip" data-go="#/search/${encodeURIComponent(query)}">${I.arrow} Semua sumber</button>`+
+          `<button class="chip active">${h(label)} <span class="cnt">${items.length}</span></button>`;
+        document.getElementById("list").innerHTML = grid(items);
+        return;
+      }
+
+      // Normal cross-provider search: fetch ALL once, filter client-side so
+      // every provider's count stays visible (e.g. "Donghua 12") and toggling
+      // is instant without a re-fetch.
+      const data = await apiCached(`/search?${qs({q:query, source:"all", page:1})}`);
       let items = (data.items||[]).filter(it=>providerVisible(it.kind));
+      const counts = {};
+      items.forEach(it=>{ counts[it.kind]=(counts[it.kind]||0)+1; });
+      const visible = allSources.filter(([v])=> v==="all" || (counts[v]||0) > 0);
+      // If the requested filter has no results, fall back to "all".
+      if(src!=="all" && !(counts[src]>0)) src = "all";
+
       const chips = document.getElementById("srcChips");
-      if(src==="all"){
-        // Cross-provider: chips reflect per-kind counts, filtered client-side.
-        const counts = {};
-        items.forEach(it=>{ counts[it.kind]=(counts[it.kind]||0)+1; });
-        const visible = allSources.filter(([v])=> v==="all" || (counts[v]||0) > 0);
+      const renderChips = ()=>{
         chips.innerHTML = visible.map(([v,l])=>{
           const c = v==="all" ? items.length : (counts[v]||0);
-          return `<button class="chip ${v==="all"?"active":""}" data-src="${v}">${h(l)} <span class="cnt">${c}</span></button>`;
+          return `<button class="chip ${v===src?"active":""}" data-src="${v}">${h(l)} <span class="cnt">${c}</span></button>`;
         }).join("");
-        document.getElementById("list").innerHTML = grid(items);
-      }else{
-        // Locked to one source: results already precise from the backend.
-        const label = (allSources.find(([v])=>v===src)||[src,src])[1];
-        chips.innerHTML =
-          `<button class="chip" data-src="all">Semua</button>`+
-          `<button class="chip active" data-src="${src}">${h(label)} <span class="cnt">${items.length}</span></button>`;
-        document.getElementById("list").innerHTML = grid(items);
-      }
-      // Clicking a chip re-runs the search with that source (re-fetch).
-      chips.querySelectorAll(".chip").forEach(ch => ch.addEventListener("click", ()=>{
-        const v = ch.dataset.src;
-        go(v==="all" ? `#/search/${encodeURIComponent(query)}` : `#/search/${encodeURIComponent(query)}/${v}`);
-      }));
+        chips.querySelectorAll(".chip").forEach(ch => ch.addEventListener("click", ()=>{
+          src = ch.dataset.src;
+          history.replaceState(null,"", src==="all" ? `#/search/${encodeURIComponent(query)}` : `#/search/${encodeURIComponent(query)}/${src}`);
+          renderChips();
+          renderList();
+        }));
+      };
+      const renderList = ()=>{
+        const filtered = src==="all" ? items : items.filter(it=>it.kind===src);
+        document.getElementById("list").innerHTML = grid(filtered);
+      };
+      renderChips();
+      renderList();
     }catch(e){ document.getElementById("list").innerHTML=`<div class="errbox">${h(e.message)}</div>`; }
   }
 
@@ -532,11 +587,57 @@
     try{
       if(kind==="cosplay") return renderCosplay(id);
       if(kind==="doujin") return renderDoujin(id);
+      if(kind==="anime"){ const data = await apiCached(`/anime/${encodeURIComponent(id)}`); return renderAnimeSeries(id, data); }
       const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
       const data = await apiCached(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`);
       if(kind==="donghua") return renderDonghuaSeries(id, data);
       return renderReadableSeries(kind, id, data, 1);
     }catch(e){ setD(`<div class="errbox">${h(e.message)}</div>`); }
+  }
+
+  function renderAnimeSeries(id, data){
+    const eps = data.episodes||[];
+    const facts = [
+      data.status?`<span class="pill ok">${h(data.status)}</span>`:"",
+      data.score?`<span class="pill">&#9733; ${h(data.score)}</span>`:"",
+      data.anime_type?`<span class="pill">${h(data.anime_type)}</span>`:"",
+      data.total_episodes?`<span class="pill">${h(data.total_episodes)} eps</span>`:"",
+      data.duration?`<span class="pill">${h(data.duration)}</span>`:"",
+      data.studio?`<span class="pill">${h(data.studio)}</span>`:"",
+      data.release_date?`<span class="pill">${h(data.release_date)}</span>`:"",
+      ...(data.genres||[]).slice(0,6).map(g=>`<span class="pill">${h(g)}</span>`),
+    ].join("");
+    const first = eps[0];
+    const last = eps[eps.length-1];
+    const actions = [
+      first?`<a class="btn primary" href="#/watchanime/${encodeURIComponent(first.id)}">${I.play} Tonton Eps ${first.number??1}</a>`:"",
+      (last && last!==first)?`<a class="btn" href="#/watchanime/${encodeURIComponent(last.id)}">Eps terbaru ${last.number??""}</a>`:"",
+      ...(data.batch||[]).slice(0,1).map(b=>`<a class="btn sm" href="#/watchanime/${encodeURIComponent(b.id)}">${I.book} Batch</a>`),
+    ].join("");
+    const syn = data.synopsis || (data.japanese_title?`Judul Jepang: ${data.japanese_title}`:"");
+    const epControls = eps.length>24
+      ? `<div class="ep-tools"><input id="epSearch" type="search" inputmode="numeric" placeholder="Lompat ke episode..." autocomplete="off"></div>`
+      : "";
+    const epGrid = eps.length
+      ? `<div class="ep-list" id="epList">${eps.map(e=>`<button class="ep-btn center" data-ep="${e.number??""}" data-go="#/watchanime/${encodeURIComponent(e.id)}">Eps ${e.number??(e.title||"?")}</button>`).join("")}</div>`
+      : `<div class="empty">Belum ada episode.</div>`;
+
+    setD(
+      heroHtml("anime","Anime",data,facts,actions,syn,data.cover)+
+      `<div class="row-head"><h2><span class="dot"></span>Episode <span class="cnt-badge">${eps.length}</span></h2></div>${epControls}${epGrid}`
+    );
+    const epSearch = document.getElementById("epSearch");
+    if(epSearch){
+      epSearch.addEventListener("input", ()=>{
+        const q = epSearch.value.trim().toLowerCase();
+        document.querySelectorAll("#epList .ep-btn").forEach(b=>{
+          const n = (b.dataset.ep||"").toLowerCase();
+          b.style.display = (!q || n.includes(q)) ? "" : "none";
+        });
+      });
+    }
+    if(first) prefetch(`/anime/episode/${encodeURIComponent(first.id)}`);
+    renderRecommendations("anime", id);
   }
 
   // Render a "Rekomendasi" row at the bottom of a detail page, sourced from
@@ -715,7 +816,7 @@
   async function renderCosplay(id){
     const data = await apiCached(`/cosplay/${encodeURIComponent(id)}`);
     // Cosplayer name is clickable -> search that name, locked to cosplay.
-    const searchChip = (kind, label) => `#/search/${encodeURIComponent(label)}/${kind}`;
+    const searchChip = (kind, label) => `#/search/${encodeURIComponent(label)}/${kind}/lock`;
     const facts = [
       data.cosplayer?`<a class="pill link" href="${searchChip("cosplay", data.cosplayer)}">${h(data.cosplayer)}</a>`:"",
       data.character?`<span class="pill">${h(data.character)}</span>`:"",
@@ -769,8 +870,8 @@
     const data = await apiCached(`/nhentai/${encodeURIComponent(id)}`);
     // Tags/genres are clickable -> search "[tag]" locked to doujin (nhentai
     // supports the `[tag]` syntax for an exact-tag match).
-    const tagSearch = (t) => `#/search/${encodeURIComponent("["+t+"]")}/doujin`;
-    const nameSearch = (t) => `#/search/${encodeURIComponent(t)}/doujin`;
+    const tagSearch = (t) => `#/search/${encodeURIComponent("["+t+"]")}/doujin/lock`;
+    const nameSearch = (t) => `#/search/${encodeURIComponent(t)}/doujin/lock`;
     const facts = [
       data.author?`<a class="pill link" href="${nameSearch(data.author)}">&#9997; ${h(data.author)}</a>`:"",
       data.artist?`<a class="pill link" href="${nameSearch(data.artist)}">${h(data.artist)}</a>`:"",
@@ -830,6 +931,57 @@
     }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
   }
 
+  async function routeWatchAnime(id){
+    shell(`<div id="d">${spinner}</div>`);
+    try{
+      const e = await apiCached(`/anime/episode/${encodeURIComponent(id)}`);
+      const mirrors = e.mirrors||[];
+      const seriesLink = e.series_id?`#/detail/anime/${encodeURIComponent(e.series_id)}`:"#/";
+      const epLabel = e.episode_number!=null ? `Episode ${e.episode_number}` : "Episode";
+      // Initial player = default embed if present, else nothing (resolved on click).
+      const initial = e.default_embed || "";
+      const player = `<div class="player-wrap"><div class="frame">${initial?`<iframe id="player" src="${h(initial)}" allowfullscreen allow="autoplay; encrypted-media; fullscreen; picture-in-picture"></iframe>`:`<div class="empty" id="playerEmpty">Pilih server di bawah.</div>`}</div></div>`;
+      // Group mirrors by quality.
+      const byQ = {};
+      mirrors.forEach(m=>{ (byQ[m.quality]=byQ[m.quality]||[]).push(m); });
+      const serverBars = Object.entries(byQ).map(([q, list])=>
+        `<div class="server-bar"><span class="lbl">${h(q)}:</span>${list.map(m=>`<button class="srv" data-stream="${h(m.stream_id)}">${h(m.name)}</button>`).join("")}</div>`
+      ).join("");
+      const dls = (e.downloads||[]).map(g=>`<div class="dl-group"><div class="q">${h(g.quality)}${g.size?` &middot; ${h(g.size)}`:""}</div><div class="mirrors">${(g.mirrors||[]).map(m=>`<a class="btn sm" target="_blank" rel="noopener noreferrer" href="${h(m.url)}">${h(m.name)}</a>`).join("")}</div></div>`).join("");
+      const nav = `<div class="server-bar" style="margin-top:8px">
+        ${e.prev_id?`<a class="btn sm" href="#/watchanime/${encodeURIComponent(e.prev_id)}">&larr; Eps sebelumnya</a>`:""}
+        <a class="btn sm" href="${seriesLink}">&#9776; Semua episode</a>
+        ${e.next_id?`<a class="btn sm" href="#/watchanime/${encodeURIComponent(e.next_id)}">Eps berikutnya &rarr;</a>`:""}</div>`;
+      setView(
+        `<div id="d">`+
+        crumbs([{href:"#/",label:"Home"},{href:"#/browse/anime",label:"Anime"},{label:`${e.series_title||"Anime"} - ${epLabel}`}])+
+        `<div class="row-head"><h2><span class="dot"></span>${h(e.series_title||"Anime")} - ${epLabel}</h2></div>`+
+        player+
+        `<div class="server-note">Server streaming dari pihak ketiga. Jika satu server gagal, coba server lain.</div>`+
+        serverBars+nav+(dls?`<div class="row-head"><h2><span class="dot"></span>Unduh</h2></div>${dls}`:"")+
+        `</div>`
+      );
+      // Resolve a mirror token to an embed URL, then swap the iframe.
+      document.querySelectorAll(".server-bar .srv").forEach(btn=>{
+        btn.onclick = async ()=>{
+          document.querySelectorAll(".server-bar .srv").forEach(b=>b.classList.remove("active"));
+          btn.classList.add("active");
+          const frame = document.querySelector(".player-wrap .frame");
+          frame.innerHTML = `<div class="empty">${spinner}</div>`;
+          try{
+            const r = await api(`/anime-stream?${qs({id: btn.dataset.stream})}`);
+            frame.innerHTML = `<iframe id="player" src="${h(r.url)}" allowfullscreen allow="autoplay; encrypted-media; fullscreen; picture-in-picture"></iframe>`;
+          }catch(err){
+            frame.innerHTML = `<div class="empty">Gagal memuat server. Coba server lain.</div>`;
+          }
+        };
+      });
+      if(e.next_id) prefetch(`/anime/episode/${encodeURIComponent(e.next_id)}`);
+      if(e.prev_id) prefetch(`/anime/episode/${encodeURIComponent(e.prev_id)}`);
+      renderRecommendations("anime", e.series_id);
+    }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
+  }
+
   async function routeRead(kind, id){
     shell(`<div id="d">${spinner}</div>`);
     try{
@@ -886,7 +1038,7 @@
 
   // route dispatch is defined in part 2 (appended)
   window.__apiku = { shell, setView, viewEl, h, qs, api, apiRaw, apiCached, prefetch, spinner, go, I,
-    routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeRead };
+    routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeWatchAnime, routeRead };
 })();
 
 // ===========================================================================
@@ -896,7 +1048,7 @@
   "use strict";
   const A = window.__apiku;
   const { shell, setView, h, apiRaw, I, go,
-    routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeRead } = A;
+    routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeWatchAnime, routeRead } = A;
 
   // ---- API Docs -----------------------------------------------------------
   const ENDPOINTS = [
@@ -1317,9 +1469,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
       case "":
       case "home":     return routeHome();
       case "browse":   return routeBrowse(parts[1], parts[2], parts[3]);
-      case "search":   return routeSearch(parts[1]||"", parts[2]);
+      case "search":   return routeSearch(parts[1]||"", parts[2], parts[3]);
       case "detail":   return routeDetail(parts[1], parts[2]);
       case "watch":    return routeWatch(parts[1]);
+      case "watchanime": return routeWatchAnime(parts[1]);
       case "read":     return routeRead(parts[1], parts[2]);
       case "docs":     return routeDocs();
       case "explorer": return routeExplorer();

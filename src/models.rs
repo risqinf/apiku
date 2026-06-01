@@ -28,6 +28,14 @@ pub enum ContentModel {
     #[serde(rename = "donghua_episode")]
     DonghuaEpisode(DonghuaEpisode),
 
+    /// Anime series (e.g. otakudesu.blog)
+    #[serde(rename = "anime_series")]
+    AnimeSeries(AnimeSeries),
+
+    /// Anime episode (streaming mirrors + downloads)
+    #[serde(rename = "anime_episode")]
+    AnimeEpisode(AnimeEpisode),
+
     #[serde(rename = "cosplay_post")]
     CosplayPost(CosplayPost),
 
@@ -180,6 +188,93 @@ pub struct VideoSource {
     pub url: String,
     pub quality: Option<String>,
     pub format: Option<String>,
+}
+
+/// Anime series detail (e.g. otakudesu.blog).
+///
+/// Carries the rich metadata block otakudesu renders (judul, japanese title,
+/// score, producer, type, status, total episodes, duration, release date,
+/// studio) plus the episode list and any "batch" download entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnimeSeries {
+    pub title: Option<String>,
+    pub japanese_title: Option<String>,
+    pub synopsis: Option<String>,
+    pub thumbnail: Option<String>,
+    pub score: Option<String>,
+    pub producer: Option<String>,
+    pub anime_type: Option<String>,
+    pub status: Option<String>,
+    pub total_episodes: Option<String>,
+    pub duration: Option<String>,
+    pub release_date: Option<String>,
+    pub studio: Option<String>,
+    pub genres: Vec<String>,
+    pub episodes: Vec<AnimeEpisodeRef>,
+    /// "Batch" download entries (whole-season archives), if present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch: Vec<AnimeEpisodeRef>,
+    pub url: String,
+}
+
+/// One episode entry within a series listing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnimeEpisodeRef {
+    /// Parsed episode number when detectable (None for batch/specials).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<f64>,
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    pub url: String,
+}
+
+/// A streaming mirror for an anime episode (one quality + host combo).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnimeStreamMirror {
+    /// Host/provider label (e.g. "vidhide", "ondesu3", "mega").
+    pub name: String,
+    /// Quality bucket label (e.g. "360p", "480p", "720p").
+    pub quality: String,
+    /// Opaque token (base64 of `{id,i,q}`) the API resolves to an embed URL.
+    pub token: String,
+    /// True when this is the page's default (pre-loaded) mirror.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+}
+
+/// Anime episode detail (e.g. otakudesu.blog episode page).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnimeEpisode {
+    pub series_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_number: Option<f64>,
+    /// The default embed URL already present in the page (ready to play).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_embed: Option<String>,
+    /// All streaming mirrors (resolved on demand via the API).
+    pub mirrors: Vec<AnimeStreamMirror>,
+    /// Download links grouped by quality.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloads: Vec<AnimeDownloadGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_episode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_episode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_url: Option<String>,
+    pub url: String,
+}
+
+/// Download group for an anime episode: a source label + per-quality mirrors.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnimeDownloadGroup {
+    /// Quality label (e.g. "Mp4 360p", "Mkv 720p").
+    pub quality: String,
+    /// Optional file size string (e.g. "77.1 MB").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    pub mirrors: Vec<DownloadMirror>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

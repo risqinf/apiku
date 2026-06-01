@@ -36,8 +36,9 @@
 use crate::engine::ScraperEngine;
 use crate::fingerprint::BrowserFingerprint;
 use crate::models::{
-    ChapterInfo, ContentModel, CosplayPost, DonghuaEpisode, DonghuaSeries, EpisodeInfo,
-    MangaChapter, MangaSeries, NovelChapter, NovelChapterRef, NovelSeries, PageImage, ScrapeResult,
+    AnimeEpisode, AnimeSeries, ChapterInfo, ContentModel, CosplayPost, DonghuaEpisode,
+    DonghuaSeries, EpisodeInfo, MangaChapter, MangaSeries, NovelChapter, NovelChapterRef,
+    NovelSeries, PageImage, ScrapeResult,
 };
 use crate::opaque::{Kind, OpaqueCodec, OpaqueError, Source};
 use crate::search::{
@@ -293,6 +294,68 @@ pub struct DownloadMirrorDto {
     pub url: String,
 }
 
+// ---- Anime (otakudesu) DTOs ----
+
+#[derive(Debug, Serialize)]
+pub struct AnimeSeriesDto {
+    pub id: String,
+    pub title: String,
+    pub japanese_title: Option<String>,
+    pub synopsis: Option<String>,
+    pub cover: Option<String>,
+    pub score: Option<String>,
+    pub producer: Option<String>,
+    pub anime_type: Option<String>,
+    pub status: Option<String>,
+    pub total_episodes: Option<String>,
+    pub duration: Option<String>,
+    pub release_date: Option<String>,
+    pub studio: Option<String>,
+    pub genres: Vec<String>,
+    pub episode_count: usize,
+    pub episodes: Vec<AnimeEpisodeRefDto>,
+    pub batch: Vec<AnimeEpisodeRefDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnimeEpisodeRefDto {
+    pub id: String,
+    pub number: Option<f64>,
+    pub title: Option<String>,
+    pub date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnimeEpisodeDto {
+    pub id: String,
+    pub series_title: Option<String>,
+    pub series_id: Option<String>,
+    pub episode_number: Option<f64>,
+    pub prev_id: Option<String>,
+    pub next_id: Option<String>,
+    /// Default embed URL ready to play (already present in the page).
+    pub default_embed: Option<String>,
+    /// Streaming mirrors; resolve a `stream_id` via `/api/v1/anime/stream`.
+    pub mirrors: Vec<AnimeMirrorDto>,
+    pub downloads: Vec<AnimeDownloadGroupDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnimeMirrorDto {
+    pub name: String,
+    pub quality: String,
+    /// Signed token resolved to an embed URL by `/api/v1/anime/stream`.
+    pub stream_id: String,
+    pub default: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnimeDownloadGroupDto {
+    pub quality: String,
+    pub size: Option<String>,
+    pub mirrors: Vec<DownloadMirrorDto>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CosplayPostDto {
     pub id: String,
@@ -511,6 +574,11 @@ pub async fn info(State(state): State<ApiState>, req: Request) -> Response {
                 label: "Anichin - donghua streaming with Indonesian subs",
             },
             ProviderDto {
+                source: "otakudesu",
+                kind: "anime",
+                label: "Otakudesu - anime streaming with Indonesian subs",
+            },
+            ProviderDto {
                 source: "cosplaytele",
                 kind: "cosplay",
                 label: "Cosplaytele - cosplay photoset archive",
@@ -573,6 +641,21 @@ pub fn api_endpoint_docs() -> Vec<EndpointDoc> {
             method: "GET",
             path: "/api/v1/donghua/episode/{id}",
             description: "Donghua episode + servers + download mirrors",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/anime/{id}",
+            description: "Anime series detail (Otakudesu) — full metadata + episode list",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/anime/episode/{id}",
+            description: "Anime episode: streaming mirrors (by quality) + downloads + nav",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/anime-stream?id={signed}",
+            description: "Resolve an anime mirror token into a playable embed URL",
         },
         EndpointDoc {
             method: "GET",
@@ -743,12 +826,14 @@ async fn run_search(
         "cosplay" | "cosplaytele" => vec![SearchSource::Cosplaytele],
         "nhentai" | "doujin" => vec![SearchSource::Nhentai],
         "novel" | "novelid" => vec![SearchSource::Novelid],
+        "anime" | "otakudesu" => vec![SearchSource::Otakudesu],
         "all" => vec![
             SearchSource::Mangaball,
             SearchSource::Anichin,
             SearchSource::Cosplaytele,
             SearchSource::Nhentai,
             SearchSource::Novelid,
+            SearchSource::Otakudesu,
         ],
         other => return Err(format!("Unknown source '{}'", other)),
     };
@@ -772,6 +857,19 @@ async fn run_search(
         }
     }
 
+    // Sort by relevance to the query so the closest title matches come first
+    // (upstream order is often "recommended"/recency, not match quality).
+    // Higher score = better; ties keep the original (per-provider) order.
+    let q_norm = normalize_for_match(query);
+    let q_terms: Vec<String> = q_norm.split_whitespace().map(|s| s.to_string()).collect();
+    let mut scored: Vec<(i64, usize, SearchItemDto)> = items
+        .into_iter()
+        .enumerate()
+        .map(|(idx, it)| (relevance_score(&it.title, &q_norm, &q_terms), idx, it))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let items: Vec<SearchItemDto> = scored.into_iter().map(|(_, _, it)| it).collect();
+
     Ok(SearchEnvelopeData {
         query: query.to_string(),
         source: source.to_string(),
@@ -779,6 +877,62 @@ async fn run_search(
         total: items.len(),
         items,
     })
+}
+
+/// Lowercase + collapse non-alphanumeric runs to single spaces.
+fn normalize_for_match(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = true;
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+            last_space = false;
+        } else if !last_space {
+            out.push(' ');
+            last_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Heuristic relevance score of a result title against a normalized query.
+fn relevance_score(title: &str, q_norm: &str, q_terms: &[String]) -> i64 {
+    if q_norm.is_empty() {
+        return 0;
+    }
+    let t = normalize_for_match(title);
+    let mut score = 0i64;
+    if t == q_norm {
+        score += 1000; // exact title match
+    }
+    if t.starts_with(q_norm) {
+        score += 400; // title begins with the query
+    }
+    if t.contains(q_norm) {
+        score += 200; // full query appears as a phrase
+    }
+    // Per-term coverage.
+    let mut matched = 0;
+    for term in q_terms {
+        if term.is_empty() {
+            continue;
+        }
+        if t.split_whitespace().any(|w| w == term) {
+            score += 40; // whole-word match
+            matched += 1;
+        } else if t.contains(term.as_str()) {
+            score += 15; // substring match
+            matched += 1;
+        }
+    }
+    if !q_terms.is_empty() && matched == q_terms.len() {
+        score += 100; // all terms present
+    }
+    // Prefer shorter titles when scores are otherwise close (closer match).
+    score -= (t.len() as i64) / 40;
+    score
 }
 
 async fn run_single_search(
@@ -1013,10 +1167,15 @@ fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
         "cosplaytele" => (Source::Cosplaytele, "cosplay"),
         "nhentai" => (Source::Nhentai, "doujin"),
         "novelid" => (Source::Novelid, "novel"),
+        "otakudesu" => (Source::Otakudesu, "anime"),
         _ => (Source::Mangaball, "unknown"),
     };
     let opaque_kind = match source {
-        Source::Mangaball | Source::Anichin | Source::Nhentai | Source::Novelid => Kind::Series,
+        Source::Mangaball
+        | Source::Anichin
+        | Source::Nhentai
+        | Source::Novelid
+        | Source::Otakudesu => Kind::Series,
         Source::Cosplaytele => Kind::Post,
     };
     let id = state.codec.encode(source, opaque_kind, &raw.url);
@@ -1112,8 +1271,38 @@ async fn run_browse(
         "cosplaytele" | "cosplay" => browse_cosplaytele(state, feed, page).await,
         "nhentai" | "doujin" => browse_nhentai(state, feed, page).await,
         "novelid" | "novel" => browse_novelid(state, feed, page).await,
+        "otakudesu" | "anime" => browse_otakudesu(state, feed, page).await,
         _ => Err(format!("unknown provider '{}'", provider)),
     }
+}
+
+async fn browse_otakudesu(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+) -> Result<Vec<SearchItemDto>, String> {
+    let url = crate::adapters::otakudesu::OtakudesuAdapter::browse_url(feed, page);
+    let html = state
+        .engine
+        .fetch_html(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let hits = crate::adapters::otakudesu::OtakudesuAdapter::parse_browse(&url, &html);
+    Ok(hits
+        .into_iter()
+        .map(|hit| {
+            let raw = SearchResultItem {
+                source: "otakudesu".to_string(),
+                title: hit.title,
+                url: hit.url,
+                thumbnail: hit.thumbnail,
+                kind: Some("anime_series".to_string()),
+                snippet: None,
+                tags: hit.genres,
+            };
+            raw_search_to_dto(state, raw)
+        })
+        .collect())
 }
 
 async fn browse_anichin(
@@ -1539,6 +1728,377 @@ fn episode_ref_to_dto(state: &ApiState, e: &EpisodeInfo) -> DonghuaEpisodeRef {
         number: e.number,
         title: e.title.clone(),
     }
+}
+
+// ---- Anime (otakudesu) ----------------------------------------------------
+
+pub async fn anime_series(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Otakudesu {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not otakudesu",
+            started,
+            &rid,
+        );
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let series = match &result.content {
+        Some(ContentModel::AnimeSeries(s)) => s,
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield an anime series",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = anime_series_to_dto(&state, series, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn anime_episode_ref_to_dto(
+    state: &ApiState,
+    e: &crate::models::AnimeEpisodeRef,
+) -> AnimeEpisodeRefDto {
+    AnimeEpisodeRefDto {
+        id: state.codec.encode(Source::Otakudesu, Kind::Item, &e.url),
+        number: e.number,
+        title: e.title.clone(),
+        date: e.date.clone(),
+    }
+}
+
+fn anime_series_to_dto(state: &ApiState, s: &AnimeSeries, id: &str) -> AnimeSeriesDto {
+    AnimeSeriesDto {
+        id: id.to_string(),
+        title: s.title.clone().unwrap_or_default(),
+        japanese_title: s.japanese_title.clone(),
+        synopsis: s.synopsis.clone(),
+        cover: proxy_opt(state, s.thumbnail.as_deref()),
+        score: s.score.clone(),
+        producer: s.producer.clone(),
+        anime_type: s.anime_type.clone(),
+        status: s.status.clone(),
+        total_episodes: s.total_episodes.clone(),
+        duration: s.duration.clone(),
+        release_date: s.release_date.clone(),
+        studio: s.studio.clone(),
+        genres: s.genres.clone(),
+        episode_count: s.episodes.len(),
+        episodes: s
+            .episodes
+            .iter()
+            .map(|e| anime_episode_ref_to_dto(state, e))
+            .collect(),
+        batch: s
+            .batch
+            .iter()
+            .map(|e| anime_episode_ref_to_dto(state, e))
+            .collect(),
+    }
+}
+
+pub async fn anime_episode(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Otakudesu {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not otakudesu",
+            started,
+            &rid,
+        );
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let ep = match &result.content {
+        Some(ContentModel::AnimeEpisode(e)) => e,
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield an anime episode",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = anime_episode_to_dto(&state, ep, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn anime_episode_to_dto(state: &ApiState, e: &AnimeEpisode, id: &str) -> AnimeEpisodeDto {
+    AnimeEpisodeDto {
+        id: id.to_string(),
+        series_title: e.series_title.clone(),
+        series_id: e
+            .series_url
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Otakudesu, Kind::Series, u)),
+        episode_number: e.episode_number,
+        prev_id: e
+            .prev_episode
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Otakudesu, Kind::Item, u)),
+        next_id: e
+            .next_episode
+            .as_deref()
+            .map(|u| state.codec.encode(Source::Otakudesu, Kind::Item, u)),
+        default_embed: e.default_embed.clone(),
+        mirrors: e
+            .mirrors
+            .iter()
+            .map(|m| AnimeMirrorDto {
+                name: m.name.clone(),
+                quality: m.quality.clone(),
+                // Sign the mirror token so the resolver can't be used as an
+                // open relay. Payload = base64url("<episode_url>|<token>").
+                stream_id: sign_anime_stream(state, &e.url, &m.token),
+                default: m.default,
+            })
+            .collect(),
+        downloads: e
+            .downloads
+            .iter()
+            .map(|g| AnimeDownloadGroupDto {
+                quality: g.quality.clone(),
+                size: g.size.clone(),
+                mirrors: g
+                    .mirrors
+                    .iter()
+                    .map(|m| DownloadMirrorDto {
+                        name: m.name.clone(),
+                        url: m.url.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Sign a `<episode_url>|<data-content token>` pair into a `p`/`s` payload the
+/// stream resolver verifies, reusing the image HMAC signer.
+fn sign_anime_stream(state: &ApiState, episode_url: &str, token: &str) -> String {
+    let raw = format!("{}|{}", episode_url, token);
+    let payload = URL_SAFE_NO_PAD.encode(raw.as_bytes());
+    let sig = state.codec.sign_image(&payload);
+    format!("{}.{}", payload, sig)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnimeStreamQuery {
+    /// `<payload>.<signature>` produced by `sign_anime_stream`.
+    pub id: String,
+}
+
+/// Resolve a signed anime stream id into a playable embed URL.
+///
+/// Performs otakudesu's two-step `admin-ajax.php` handshake (fetch nonce, then
+/// fetch the base64 embed HTML for the `{id,i,q}` token) and returns the
+/// iframe `src`.
+pub async fn anime_stream(
+    State(state): State<ApiState>,
+    Query(q): Query<AnimeStreamQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    let (payload, sig) = match q.id.split_once('.') {
+        Some(p) => p,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Malformed stream id",
+                started,
+                &rid,
+            )
+        }
+    };
+    if !state.codec.verify_image(payload, sig) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "bad_signature",
+            "Stream id signature is invalid",
+            started,
+            &rid,
+        );
+    }
+    let raw = match URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+    {
+        Some(s) => s,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Stream payload is not valid",
+                started,
+                &rid,
+            )
+        }
+    };
+    let (episode_url, token) = match raw.split_once('|') {
+        Some(p) => p,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Stream payload missing token",
+                started,
+                &rid,
+            )
+        }
+    };
+
+    match resolve_otakudesu_stream(&state, episode_url, token).await {
+        Ok(embed) => ok(
+            StatusCode::OK,
+            serde_json::json!({ "type": "embed", "url": embed }),
+            started,
+            false,
+            &rid,
+        ),
+        Err(e) => err(StatusCode::BAD_GATEWAY, "resolve_failed", e, started, &rid),
+    }
+}
+
+/// Two-step otakudesu AJAX resolution: token -> embed iframe URL.
+async fn resolve_otakudesu_stream(
+    state: &ApiState,
+    episode_url: &str,
+    token: &str,
+) -> Result<String, String> {
+    use crate::adapters::otakudesu::{AJAX_NONCE_ACTION, AJAX_PATH, AJAX_STREAM_ACTION};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+
+    // The token is base64 of `{"id":..,"i":..,"q":".."}`.
+    let decoded = STANDARD
+        .decode(token)
+        .map_err(|_| "bad token".to_string())?;
+    let obj: serde_json::Value =
+        serde_json::from_slice(&decoded).map_err(|_| "bad token json".to_string())?;
+    let id = obj.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let i = obj.get("i").and_then(|v| v.as_i64()).unwrap_or(0);
+    let qlt = obj
+        .get("q")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let ajax_url = "https://otakudesu.blog".to_string() + AJAX_PATH;
+    let client = state.engine.client();
+    let build_headers = |body_kind: &str| {
+        let fp = BrowserFingerprint::for_url(episode_url);
+        let mut h = fp.as_header_map();
+        h.insert("Referer".to_string(), episode_url.to_string());
+        h.insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
+        h.insert("Origin".to_string(), "https://otakudesu.blog".to_string());
+        h.remove("Accept-Encoding");
+        let _ = body_kind;
+        h
+    };
+
+    // 1) nonce
+    let nonce_hdrs = state
+        .engine
+        .pipeline()
+        .build_headers(&ajax_url, None, Some(&build_headers("nonce")))
+        .map_err(|e| e.to_string())?;
+    let nonce_resp = client
+        .post(&ajax_url)
+        .headers(nonce_hdrs)
+        .form(&[("action", AJAX_NONCE_ACTION)])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let nonce_json: serde_json::Value = nonce_resp.json().await.map_err(|e| e.to_string())?;
+    let nonce = nonce_json
+        .get("data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "no nonce".to_string())?
+        .to_string();
+
+    // 2) resolve embed
+    let stream_hdrs = state
+        .engine
+        .pipeline()
+        .build_headers(&ajax_url, None, Some(&build_headers("stream")))
+        .map_err(|e| e.to_string())?;
+    let id_s = id.to_string();
+    let i_s = i.to_string();
+    let resp = client
+        .post(&ajax_url)
+        .headers(stream_hdrs)
+        .form(&[
+            ("id", id_s.as_str()),
+            ("i", i_s.as_str()),
+            ("q", qlt.as_str()),
+            ("nonce", nonce.as_str()),
+            ("action", AJAX_STREAM_ACTION),
+        ])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let data = json
+        .get("data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "no stream data".to_string())?;
+    let fragment = STANDARD
+        .decode(data)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .ok_or_else(|| "bad stream fragment".to_string())?;
+    crate::adapters::otakudesu::OtakudesuAdapter::embed_src_from_fragment(&fragment)
+        .ok_or_else(|| "no embed url in fragment".to_string())
 }
 
 pub async fn donghua_episode(
@@ -2922,6 +3482,9 @@ fn referer_for_host(host: &str) -> String {
     if h.contains("novelid.org") {
         return "https://novelid.org/".to_string();
     }
+    if h.contains("otakudesu.") {
+        return "https://otakudesu.blog/".to_string();
+    }
     if h.contains("mangaball.net")
         || h.contains("poke-black-and-white.net")
         || h.contains("red-and-blue.net")
@@ -2979,6 +3542,13 @@ fn is_allowed_image_host(url: &str) -> bool {
     }
     // NovelID (covers are hosted on the main domain, sometimes via wp.com)
     if host == "novelid.org" || host.ends_with(".novelid.org") {
+        return true;
+    }
+    // Otakudesu (anime covers on the main domain + any wp subdomain)
+    if host == "otakudesu.blog" || host.ends_with(".otakudesu.blog") {
+        return true;
+    }
+    if host == "otakudesu.bid" || host == "otakudesu.cloud" || host.contains("otakudesu.") {
         return true;
     }
 

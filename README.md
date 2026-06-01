@@ -5,20 +5,20 @@
 [![Live](https://img.shields.io/website?url=https%3A%2F%2Fapi.risqinf.web.id%2Fapi%2Fv1%2Fhealth&label=api.risqinf.web.id)](https://api.risqinf.web.id)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> RESTful scraping API for **Mangaball**, **Anichin**, **Cosplaytele**, **nhentai**, and **NovelID** — one HTTP service that other developers can build manga readers, donghua players, cosplay galleries, doujinshi browsers, and novel readers against, without ever seeing the upstream URLs.
+> RESTful scraping API for **Mangaball**, **Anichin**, **Otakudesu**, **Cosplaytele**, **nhentai**, and **NovelID** — one HTTP service that other developers can build manga readers, anime & donghua players, cosplay galleries, doujinshi browsers, and novel readers against, without ever seeing the upstream URLs.
 
 - **Live demo:** <https://api.risqinf.web.id> (hosted on AWS — same binary, same endpoints)
 - **Repo:** <https://github.com/risqinf/apiku>
 - **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
 - **Author:** [@risqinf](https://github.com/risqinf)
 - **License:** MIT
-- **Version:** 0.2.1 (see `Cargo.toml`)
+- **Version:** 0.2.2 (see `Cargo.toml`)
 
 ---
 
 ## Highlights
 
-- **One API, five providers.** Manga/komik, donghua, cosplay archives, doujinshi catalogues, and Indonesian novels behind a uniform JSON envelope.
+- **One API, six providers.** Anime, donghua, manga/komik, cosplay archives, doujinshi catalogues, and Indonesian novels behind a uniform JSON envelope.
 - **Opaque IDs.** Resource IDs are HMAC-SHA256-signed tokens. Consumers never see upstream URLs.
 - **Image proxy.** Every cover, page and thumbnail is rewritten to a signed local proxy. Source CDNs stay hidden.
 - **Cosplay video → HLS, server-resolved.** Cosplaytele videos are served via an encrypted third-party embed (`cossora.stream`) that blocks plain iframes. apiku fetches the embed with the right Referer, **decrypts the real `.m3u8` URL server-side (AES-256-CBC)**, and hands the client a playable HLS stream. Only the tiny playlists are proxied — the heavy `.ts` segments stream **directly from the CDN to the client** to save bandwidth. No iframe embeds anywhere.
@@ -158,6 +158,9 @@ Base URL: `http://127.0.0.1:3000` (local) — base path: `/api/v1`.
 | `GET` | `/api/v1/manga/chapter/{id}` | Manga chapter pages |
 | `GET` | `/api/v1/donghua/{id}?page=N&size=N` | Donghua series detail (Anichin) — episode list paginated |
 | `GET` | `/api/v1/donghua/episode/{id}` | Donghua episode (servers + downloads) |
+| `GET` | `/api/v1/anime/{id}` | Anime series detail (Otakudesu) — full metadata + episode list |
+| `GET` | `/api/v1/anime/episode/{id}` | Anime episode — quality-grouped streaming mirrors + downloads |
+| `GET` | `/api/v1/anime-stream?id=...` | Resolve an anime mirror token into a playable embed URL |
 | `GET` | `/api/v1/cosplay/{id}` | Cosplay post (gallery + resolved video + downloads) |
 | `GET` | `/api/v1/cosplay-video?p=...&s=...` | Resolve a Cosplaytele embed into a playable HLS stream URL |
 | `GET` | `/api/v1/novel/{id}?page=N&size=N` | Novel series detail (NovelID) — chapter list paginated, supports upstream-paginated novels with thousands of chapters |
@@ -169,7 +172,7 @@ Base URL: `http://127.0.0.1:3000` (local) — base path: `/api/v1`.
 
 Every response carries a generated `X-Request-Id` header echoed in `meta.request_id`.
 
-Providers are: `mangaball` | `anichin` | `cosplaytele` | `nhentai` | `novelid`.
+Providers are: `mangaball` | `anichin` | `otakudesu` | `cosplaytele` | `nhentai` | `novelid`.
 
 ---
 
@@ -181,6 +184,7 @@ Providers are: `mangaball` | `anichin` | `cosplaytele` | `nhentai` | `novelid`.
 |---|---|
 | `mangaball` | `home` (featured), `popular`, `latest`, `recommend` (page-sliced from a single API response, `size` defaults to 30, max 60) |
 | `anichin` | `home` (= latest update), `popular`, `rating`, `title` (A-Z), `latest-added` |
+| `otakudesu` | `ongoing`, `complete`, or any genre slug (`action`, `romance`, `comedy`, `fantasy`, `adventure`, `drama`, ...) |
 | `cosplaytele` | `home` (latest), `popular` / `hot`, or any category slug (e.g. `genshin-impact`, `azur-lane`) |
 | `nhentai` | `home` (recent), `popular-today`, `popular-week`, `popular` (all-time) |
 | `novelid` | `home` (semua), `popular` (alias of `tamat`), or any genre slug: `novel-translate`, `fantasi`, `romantis`, `religi`, `motivasi`, `horror`, `aksi`, `komedi`, `sastra`, `novel-anak` |
@@ -210,9 +214,10 @@ curl 'http://127.0.0.1:3000/api/v1/browse/mangaball?feed=popular&size=30&page=1'
 
 `GET /api/v1/search?q={query}&source={source}&page={n}`
 
-- `source`: `all` (default) | `manga` | `donghua` | `cosplay` | `nhentai` | `novel`
+- `source`: `all` (default) | `manga` | `donghua` | `anime` | `cosplay` | `nhentai` | `novel`
 - `page`: 1-based, applies to providers that support upstream pagination
 - nhentai accepts inline `[tag]` syntax — e.g. `?q=Genshin+Impact+%5Bfull+color%5D&source=nhentai`
+- results are relevance-ranked (closest title matches first) across all providers
 
 ```bash
 curl 'http://127.0.0.1:3000/api/v1/search?q=one+piece&source=manga'
@@ -557,6 +562,7 @@ Four layers of defence:
    - `cosplaytele.com`, `*.cosplaytele.com`
    - `nhentai.net`, `nhentai.xxx`, `nhentai.to`, `i1..i4.nhentai.net`, `t1..t4.nhentai.net`
    - `novelid.org` and the wp.com mirror it uses
+   - `otakudesu.blog` and its mirror domains (anime covers)
 3. **Referer spoofing** — outgoing requests carry the source domain as `Referer` to bypass hotlink protection.
 4. **Browser fingerprint rotation** — every outgoing image request applies a coherent browser identity (User-Agent, Sec-CH-UA, Sec-Fetch-* tailored for an `<img>` request, narrow image-Accept) picked deterministically per upstream URL.
 
@@ -1119,6 +1125,7 @@ src/
     ├── mod.rs         SiteAdapter trait + registry
     ├── mangaball.rs   Mangaball SPA adapter (multi-step API + browse search_types)
     ├── anichin.rs     Anichin donghua streaming adapter (HTML + browse orders)
+    ├── otakudesu.rs   Otakudesu anime streaming adapter (HTML + AJAX mirror resolver + genre feeds)
     ├── cosplaytele.rs Cosplaytele cosplay archive adapter (HTML + categories)
     ├── nhentai.rs     nhentai doujinshi adapter (JSON API + sharded CDN + popular feeds)
     └── novelid.rs     NovelID Indonesian novel adapter (HTML, upstream-paginated chapter lists)
@@ -1132,7 +1139,7 @@ Planned work, roughly in priority order. Contributions and suggestions welcome v
 
 ### Next up
 
-- [ ] **Stream Anime** — add a dedicated anime streaming provider alongside donghua (subbed/dubbed episodes, multi-server playback, quality/download mirrors), reusing the existing HLS resolver + player pipeline. **This is the next major target.**
+- [ ] **Nekopoi** — add the Nekopoi provider (adult anime / hentai streaming) behind the 18+ toggle, reusing the existing HLS resolver + episode/mirror player pipeline. **This is the next major target.**
 
 ### Backlog
 
@@ -1146,11 +1153,13 @@ Planned work, roughly in priority order. Contributions and suggestions welcome v
 
 ### Done
 
+- [x] **Stream Anime (Otakudesu)** — full anime streaming provider: search, rich detail metadata, episode list, quality-grouped streaming mirrors resolved on demand, downloads, and genre feeds.
 - [x] Cosplay video playback via server-side HLS resolution (no iframe embeds).
 - [x] High-precision Cosplaytele search + clickable cosplayer/tag pills.
+- [x] Relevance-ranked cross-provider search with per-source filter counts.
 - [x] Configurable branding (name/tagline/logo/footer/ads) via config + env, with logo auto-detection.
 - [x] Reworked API Explorer with grouped endpoints and copy-ready multi-language samples.
-- [x] Modern UI: animated background, real-time toggle switches, light/dark theme.
+- [x] Modern UI: animated background, real-time toggle switches, light/dark theme, overflow nav menu.
 - [x] Full episode lists for donghua, language-grouped manga chapters, NovelID upstream pagination.
 
 ---

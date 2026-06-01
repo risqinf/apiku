@@ -20,6 +20,8 @@ pub enum SearchSource {
     Nhentai,
     /// novelid.org HTML-based search
     Novelid,
+    /// otakudesu.blog HTML-based anime search
+    Otakudesu,
 }
 
 impl SearchSource {
@@ -31,6 +33,7 @@ impl SearchSource {
             SearchSource::Mangaball => "mangaball",
             SearchSource::Nhentai => "nhentai",
             SearchSource::Novelid => "novelid",
+            SearchSource::Otakudesu => "otakudesu",
         }
     }
 
@@ -42,6 +45,7 @@ impl SearchSource {
             "mangaball" | "manga" | "mb" => Some(Self::Mangaball),
             "nhentai" | "nh" => Some(Self::Nhentai),
             "novelid" | "novel" | "nv" => Some(Self::Novelid),
+            "otakudesu" | "anime" | "od" => Some(Self::Otakudesu),
             _ => None,
         }
     }
@@ -72,6 +76,10 @@ pub fn build_search_url(source: SearchSource, query: &str, page: u32) -> Option<
             Some(crate::adapters::nhentai::NhentaiAdapter::api_url_for_search(query, page.max(1)))
         }
         SearchSource::Novelid => Some(crate::adapters::novelid::NovelidAdapter::search_url(
+            query,
+            page.max(1),
+        )),
+        SearchSource::Otakudesu => Some(crate::adapters::otakudesu::OtakudesuAdapter::search_url(
             query,
             page.max(1),
         )),
@@ -126,7 +134,33 @@ pub fn parse_search_html(
             }
         }
         SearchSource::Novelid => parse_novelid_search(base_url, html),
+        SearchSource::Otakudesu => parse_otakudesu_search(base_url, html),
     }
+}
+
+/// Parse otakudesu.blog anime search HTML into unified search items.
+pub fn parse_otakudesu_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
+    crate::adapters::otakudesu::OtakudesuAdapter::parse_search(base_url, html)
+        .into_iter()
+        .map(|hit| {
+            let mut tags = hit.genres;
+            if let Some(s) = hit.status {
+                tags.push(s);
+            }
+            if let Some(r) = hit.rating {
+                tags.push(format!("\u{2605} {}", r));
+            }
+            SearchResultItem {
+                source: "otakudesu".to_string(),
+                title: hit.title,
+                url: hit.url,
+                thumbnail: hit.thumbnail,
+                kind: Some("anime_series".to_string()),
+                snippet: None,
+                tags,
+            }
+        })
+        .collect()
 }
 
 /// Parse novelid.org search HTML into unified search items.
@@ -677,6 +711,8 @@ pub fn content_kind(c: &ContentModel) -> &'static str {
         ContentModel::MangaChapter(_) => "manga_chapter",
         ContentModel::DonghuaSeries(_) => "donghua_series",
         ContentModel::DonghuaEpisode(_) => "donghua_episode",
+        ContentModel::AnimeSeries(_) => "anime_series",
+        ContentModel::AnimeEpisode(_) => "anime_episode",
         ContentModel::CosplayPost(_) => "cosplay_post",
         ContentModel::NovelSeries(_) => "novel_series",
         ContentModel::NovelChapter(_) => "novel_chapter",
