@@ -295,6 +295,12 @@ svg { display: block; }
 /* ---------- Layout ---------- */
 main { max-width: var(--maxw); margin: 0 auto; padding: 24px 18px 90px; }
 
+/* Quick content-swap fade on navigation. Opacity + a 4px lift only, so it
+   composites on the GPU and never triggers layout. ~140ms keeps it snappy
+   rather than sluggish. Disabled in lite mode (see [data-lite] rules). */
+@keyframes viewIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+#view.view-in { animation: viewIn .14s ease-out; }
+
 .hero-banner {
   position: relative;
   border-radius: 22px;

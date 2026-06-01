@@ -200,6 +200,10 @@
     _inflight.set(path, p);
     return p;
   }
+  // Synchronous cache peek: returns warmed data immediately (or undefined).
+  // Lets a route render instantly with no spinner when the pointer/touch
+  // prefetch already fetched what the user is opening.
+  function peek(path){ return _cache.get(path); }
   function _drainIdle(){
     if(_idleRunning) return; _idleRunning = true;
     const step = ()=>{
@@ -307,12 +311,75 @@
     document.addEventListener("keydown", esc);
   }
 
-  function shell(inner){
+  // ---- Persistent shell ---------------------------------------------------
+  // The chrome (drawer, header, footer) is built ONCE. Navigation then only
+  // swaps the <main id="view"> content instead of tearing down and rebuilding
+  // the whole page (and re-wiring every listener) on each route change. That
+  // rebuild was what made every navigation flash like a full reload.
+  let _chromeBuilt = false;
+  let _navAdult = null; // adult state the nav markup was last built with
+
+  // Build the desktop nav markup (provider links + the "More" tools menu).
+  function deskNavMarkup(links, tools, seg){
+    return links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")+
+      `<div class="navmore">
+          <button class="navmore-btn ${tools.some(t=>t[0]===seg)?"active":""}" id="moreBtn" aria-haspopup="true" aria-expanded="false">${I.dots}</button>
+          <div class="navmore-menu" id="moreMenu">
+            ${tools.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
+            <a href="/tester">${I.explorer}<span>Dev Console</span></a>
+          </div>
+        </div>`;
+  }
+
+  // Refresh the nav: rebuild link markup only when the adult set changed
+  // (first paint or after the 18+ toggle); otherwise just move the active
+  // highlight, which is cheap and never flashes.
+  function renderNav(){
     const seg = activeNavSeg();
     const links = navLinks();
     const tools = toolLinks();
-    const themeIco = store.theme === "dark" ? I.sun : I.moon;
+    const adult = adultOn();
+    const desk = document.getElementById("deskNav");
+    const dnav = document.getElementById("drawerNav");
+    if(_navAdult !== adult){
+      _navAdult = adult;
+      if(desk) desk.innerHTML = deskNavMarkup(links, tools, seg);
+      if(dnav){
+        dnav.innerHTML =
+          links.map(([s,href,label,ico,ad])=>navItem(s,href,label,ico,ad,seg)).join("")+
+          `<div class="dsep"></div>`+
+          tools.map(([s,href,label,ico,ad])=>navItem(s,href,label,ico,ad,seg)).join("")+
+          `<a href="/tester"><span>${I.explorer}</span><span>Dev Console</span></a>`;
+      }
+      wireMore();
+    }
+    document.querySelectorAll("#deskNav a[data-seg], #drawerNav a[data-seg]").forEach(a=>{
+      a.classList.toggle("active", a.dataset.seg===seg);
+    });
+    const moreBtn = document.getElementById("moreBtn");
+    if(moreBtn) moreBtn.classList.toggle("active", tools.some(t=>t[0]===seg));
+  }
 
+  // Wire the desktop "More" overflow menu (re-run whenever deskNav is rebuilt).
+  function wireMore(){
+    const moreBtn = document.getElementById("moreBtn");
+    const moreMenu = document.getElementById("moreMenu");
+    if(!moreBtn || !moreMenu) return;
+    const closeMore = ()=>{ moreMenu.classList.remove("open"); moreBtn.setAttribute("aria-expanded","false"); document.removeEventListener("click", onDocClick); };
+    const onDocClick = (e)=>{ if(!moreMenu.contains(e.target) && e.target!==moreBtn && !moreBtn.contains(e.target)) closeMore(); };
+    moreBtn.onclick = (e)=>{
+      e.stopPropagation();
+      const open = moreMenu.classList.toggle("open");
+      moreBtn.setAttribute("aria-expanded", String(open));
+      if(open) setTimeout(()=>document.addEventListener("click", onDocClick),0);
+    };
+    moreMenu.querySelectorAll("a").forEach(a => a.addEventListener("click", closeMore));
+  }
+
+  // Build the chrome once and wire all the global (route-independent) listeners
+  // against stable element IDs, so navigation never has to re-attach them.
+  function buildChrome(){
+    const themeIco = store.theme === "dark" ? I.sun : I.moon;
     app.innerHTML = `
       <div class="drawer-scrim" id="scrim"></div>
       <aside class="drawer" id="drawer">
@@ -320,12 +387,7 @@
           <span class="brand">${brandMark()}</span>
           <button class="icon-btn" id="drawerClose">${I.close}</button>
         </div>
-        <nav>
-          ${links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
-          <div class="dsep"></div>
-          ${tools.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
-          <a href="/tester"><span>${I.explorer}</span><span>Dev Console</span></a>
-        </nav>
+        <nav id="drawerNav"></nav>
         <div class="dsep"></div>
         <div class="drow">
           <button class="switch ${adultOn()?"on":""}" id="adultBtnD" role="switch" aria-checked="${adultOn()}">
@@ -346,16 +408,7 @@
       <header class="hdr">
         <button class="icon-btn hamburger" id="hamburger">${I.menu}</button>
         <a class="brand" href="#/">${brandMark()}</a>
-        <nav class="desktop">
-          ${links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
-          <div class="navmore">
-            <button class="navmore-btn ${tools.some(t=>t[0]===seg)?"active":""}" id="moreBtn" aria-haspopup="true" aria-expanded="false">${I.dots}</button>
-            <div class="navmore-menu" id="moreMenu">
-              ${tools.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
-              <a href="/tester">${I.explorer}<span>Dev Console</span></a>
-            </div>
-          </div>
-        </nav>
+        <nav class="desktop" id="deskNav"></nav>
         <div class="spacer"></div>
         <form class="searchbox" id="searchform">
           ${I.search}
@@ -364,25 +417,21 @@
         <button class="icon-btn ${adultOn()?"on":""}" id="adultBtn" title="Konten 18+">18+</button>
         <button class="icon-btn" id="themeBtn" title="Ganti tema">${themeIco}</button>
       </header>
-      <main id="view">${inner}</main>
+      <main id="view"></main>
       <footer>${footerHtml()}</footer>`;
 
     // search
     const form = document.getElementById("searchform");
     const input = document.getElementById("searchinput");
     form.addEventListener("submit", (e)=>{ e.preventDefault(); const q=input.value.trim(); if(q) go(`#/search/${encodeURIComponent(q)}`); });
-    const m = location.hash.match(/^#\/search\/([^/]+)/);
-    if (m) input.value = decodeURIComponent(m[1]);
 
-    // theme — switch live (no full re-render, so it doesn't flicker)
+    // theme — switch live (no re-render, so it never flickers)
     const themeBtn = document.getElementById("themeBtn");
     const themeBtnD = document.getElementById("themeBtnD");
     const toggleTheme = ()=>{
       store.theme = store.theme==="dark"?"light":"dark";
       applyTheme();
-      // update header icon button
       if(themeBtn) themeBtn.innerHTML = store.theme==="dark" ? I.sun : I.moon;
-      // update drawer switch state + icon
       if(themeBtnD){
         themeBtnD.classList.toggle("on", store.theme==="dark");
         themeBtnD.setAttribute("aria-checked", String(store.theme==="dark"));
@@ -393,18 +442,17 @@
     if(themeBtn) themeBtn.onclick = toggleTheme;
     if(themeBtnD) themeBtnD.onclick = toggleTheme;
 
-    // adult — animate the switch first, then re-render after the transition
+    // adult — flip the switch, refresh nav + current content
     const adultBtn = document.getElementById("adultBtn");
     const adultBtnD = document.getElementById("adultBtnD");
     const enableAdult = ()=>{
       store.adult = true;
       if(adultBtnD){ adultBtnD.classList.add("on"); adultBtnD.setAttribute("aria-checked","true"); }
       if(adultBtn) adultBtn.classList.add("on");
-      setTimeout(()=>window.__apiku.router(), 200);
+      window.__apiku.router();
     };
     const toggleAdult = ()=>{
       if(!adultOn()){ showAgeModal(enableAdult); return; }
-      // turning OFF: animate switch off first
       store.adult = false;
       if(adultBtnD){ adultBtnD.classList.remove("on"); adultBtnD.setAttribute("aria-checked","false"); }
       if(adultBtn) adultBtn.classList.remove("on");
@@ -412,8 +460,8 @@
       const inAdult = (parts[0]==="browse" && (parts[1]==="cosplay"||parts[1]==="doujin"))
         || (parts[0]==="detail" && (parts[1]==="cosplay"||parts[1]==="doujin"))
         || (parts[0]==="read" && parts[1]==="nhentai");
-      if(inAdult){ setTimeout(()=>go("#/"), 200); return; }
-      setTimeout(()=>window.__apiku.router(), 200);
+      if(inAdult){ go("#/"); return; }
+      window.__apiku.router();
     };
     if(adultBtn) adultBtn.onclick = toggleAdult;
     if(adultBtnD) adultBtnD.onclick = toggleAdult;
@@ -422,7 +470,7 @@
     const liteBtnD = document.getElementById("liteBtnD");
     if(liteBtnD) liteBtnD.onclick = ()=> setLite(!LITE);
 
-    // drawer
+    // drawer (delegated link-close so it survives nav re-renders)
     const drawer = document.getElementById("drawer");
     const scrim = document.getElementById("scrim");
     const openDrawer = ()=>{ drawer.classList.add("open"); scrim.classList.add("open"); };
@@ -430,21 +478,26 @@
     document.getElementById("hamburger").onclick = openDrawer;
     document.getElementById("drawerClose").onclick = closeDrawer;
     scrim.onclick = closeDrawer;
-    drawer.querySelectorAll("nav a").forEach(a => a.addEventListener("click", closeDrawer));
+    drawer.addEventListener("click", (e)=>{ if(e.target.closest("nav a")) closeDrawer(); });
+  }
 
-    // desktop "More" overflow menu (tools)
-    const moreBtn = document.getElementById("moreBtn");
-    const moreMenu = document.getElementById("moreMenu");
-    if(moreBtn && moreMenu){
-      const closeMore = ()=>{ moreMenu.classList.remove("open"); moreBtn.setAttribute("aria-expanded","false"); document.removeEventListener("click", onDocClick); };
-      const onDocClick = (e)=>{ if(!moreMenu.contains(e.target) && e.target!==moreBtn && !moreBtn.contains(e.target)) closeMore(); };
-      moreBtn.onclick = (e)=>{
-        e.stopPropagation();
-        const open = moreMenu.classList.toggle("open");
-        moreBtn.setAttribute("aria-expanded", String(open));
-        if(open) setTimeout(()=>document.addEventListener("click", onDocClick),0);
-      };
-      moreMenu.querySelectorAll("a").forEach(a => a.addEventListener("click", closeMore));
+  // Swap the page content. Builds the chrome on first call, then only updates
+  // <main id="view"> and the nav highlight — so navigation feels instant.
+  function shell(inner){
+    if(!_chromeBuilt){ buildChrome(); _chromeBuilt = true; _navAdult = null; }
+    renderNav();
+    const input = document.getElementById("searchinput");
+    if(input){
+      const m = location.hash.match(/^#\/search\/([^/]+)/);
+      input.value = m ? decodeURIComponent(m[1]) : "";
+    }
+    setView(inner);
+    // Quick GPU-only fade so the swap reads as smooth, not a hard cut. Cache-
+    // first routes fill #view synchronously (before paint), so the fade plays
+    // on the final content. Skipped in lite mode to stay perfectly still.
+    if(!LITE){
+      const v = viewEl();
+      if(v){ v.classList.remove("view-in"); void v.offsetWidth; v.classList.add("view-in"); }
     }
   }
 
@@ -476,6 +529,13 @@
     else prefetch(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size:CHAPTER_SIZE})}`);
   }
   document.addEventListener("pointerenter", (e)=>{
+    const el = e.target.closest && e.target.closest("[data-prefetch-kind]");
+    if(el) _prefetchCard(el);
+  }, true);
+  // On touch, pointerenter only fires after the tap lands. Warm on pointerdown
+  // too so the cache is primed the instant a finger presses a card, making the
+  // open feel immediate on phones.
+  document.addEventListener("pointerdown", (e)=>{
     const el = e.target.closest && e.target.closest("[data-prefetch-kind]");
     if(el) _prefetchCard(el);
   }, true);
@@ -622,9 +682,27 @@
   }
 
   async function routeDetail(kind, id){
-    shell(`<div id="d">${spinner}</div>`);
     const ep = DETAIL_EP[kind];
-    if(!ep) return setD(`<div class="errbox">Tipe tidak dikenal: ${h(kind)}</div>`);
+    if(!ep){ shell(`<div id="d"></div>`); return setD(`<div class="errbox">Tipe tidak dikenal: ${h(kind)}</div>`); }
+
+    // Cache-first: if a hover/touch prefetch already warmed this detail, render
+    // it synchronously with no spinner so the page appears instantly.
+    if(kind==="anime"){
+      const cached = peek(`/anime/${encodeURIComponent(id)}`);
+      if(cached){ shell(`<div id="d"></div>`); return renderAnimeSeries(id, cached); }
+    } else if(kind!=="cosplay" && kind!=="doujin"){
+      const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
+      const cached = peek(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`);
+      if(cached){
+        shell(`<div id="d"></div>`);
+        return kind==="donghua" ? renderDonghuaSeries(id, cached) : renderReadableSeries(kind, id, cached, 1);
+      }
+    } else {
+      const cached = peek(kind==="cosplay" ? `/cosplay/${encodeURIComponent(id)}` : `/nhentai/${encodeURIComponent(id)}`);
+      if(cached){ shell(`<div id="d"></div>`); return kind==="cosplay" ? renderCosplay(id) : renderDoujin(id); }
+    }
+
+    shell(`<div id="d">${spinner}</div>`);
     try{
       if(kind==="cosplay") return renderCosplay(id);
       if(kind==="doujin") return renderDoujin(id);
@@ -945,7 +1023,8 @@
   }
 
   async function routeWatch(id){
-    shell(`<div id="d">${spinner}</div>`);
+    const warmed = peek(`/donghua/episode/${encodeURIComponent(id)}`);
+    shell(`<div id="d">${warmed?"":spinner}</div>`);
     try{
       const e = await apiCached(`/donghua/episode/${encodeURIComponent(id)}`);
       const servers = e.servers||[];
@@ -973,7 +1052,8 @@
   }
 
   async function routeWatchAnime(id){
-    shell(`<div id="d">${spinner}</div>`);
+    const warmed = peek(`/anime/episode/${encodeURIComponent(id)}`);
+    shell(`<div id="d">${warmed?"":spinner}</div>`);
     try{
       const e = await apiCached(`/anime/episode/${encodeURIComponent(id)}`);
       const mirrors = e.mirrors||[];
@@ -1024,10 +1104,11 @@
   }
 
   async function routeRead(kind, id){
-    shell(`<div id="d">${spinner}</div>`);
+    if(kind==="novel"){ shell(`<div id="d">${peek(`/novel/chapter/${encodeURIComponent(id)}`)?"":spinner}</div>`); return renderNovelChapter(id); }
+    const ep = kind==="nhentai"?"nhentai/chapter":"manga/chapter";
+    const warmed = peek(`/${ep}/${encodeURIComponent(id)}`);
+    shell(`<div id="d">${warmed?"":spinner}</div>`);
     try{
-      if(kind==="novel") return renderNovelChapter(id);
-      const ep = kind==="nhentai"?"nhentai/chapter":"manga/chapter";
       const c = await apiCached(`/${ep}/${encodeURIComponent(id)}`);
       const pages = c.pages||[];
       // Pages render at natural width (no forced ratio); the reader column is
@@ -1065,6 +1146,7 @@
   }
 
   async function renderNovelChapter(id){
+    try{
     const c = await apiCached(`/novel/chapter/${encodeURIComponent(id)}`);
     const paras = (c.body||"").split(/\n{2,}/).map(s=>s.trim()).filter(Boolean).map(p=>`<p>${h(p)}</p>`).join("");
     const nav = `<div class="reader-nav">
@@ -1075,6 +1157,7 @@
       (c.chapter_title?`<p style="color:var(--muted);margin-top:-8px">${h(c.chapter_title)}</p>`:"")+
       `<div class="novel-body">${paras||"<p>(kosong)</p>"}</div>`+nav);
     if(c.next_id) prefetch(`/novel/chapter/${encodeURIComponent(c.next_id)}`);
+    }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
   }
 
   // route dispatch is defined in part 2 (appended)

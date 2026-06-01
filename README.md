@@ -12,7 +12,7 @@
 - **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
 - **Author:** [@risqinf](https://github.com/risqinf)
 - **License:** MIT
-- **Version:** 0.2.3 (see `Cargo.toml`)
+- **Version:** 0.2.4 (see `Cargo.toml`)
 
 ---
 
@@ -1159,6 +1159,7 @@ Planned work, roughly in priority order. Contributions and suggestions welcome v
 
 ### Done
 
+- [x] **Instant client-side navigation (0.2.4)** — the app shell (header / nav / drawer / footer) is built once and persists; navigation only swaps the content area instead of rebuilding the whole page, so moving between pages no longer flashes like a reload. Detail/watch/read pages render from a hover/touch-warmed cache with no spinner when the data is already in hand, and a 140 ms GPU-only fade keeps swaps smooth.
 - [x] **Performance pass for low-end devices (0.2.3)** — lightweight static background (no animated orbs / blur / blend modes), automatic "lite mode" on weak hardware (<=2 GiB RAM / <=2 cores, data-saver, 2G, or reduced-motion) that disables animations and background prefetch, plus a manual toggle. Targets a 2008 PC or a 2015 phone.
 - [x] **Tidier project layout (0.2.3)** — front-end assets split into `assets/webapp` + `assets/tester`; HTTP-serving code grouped under `src/web`, kept separate from the engine and adapters.
 - [x] **Stream Anime (Otakudesu)** — full anime streaming provider: search, rich detail metadata, episode list, quality-grouped streaming mirrors resolved on demand, downloads, and genre feeds.
