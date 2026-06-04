@@ -125,7 +125,7 @@ fn default_site_name() -> String {
 }
 
 fn default_tagline() -> String {
-    "Streaming donghua, baca komik & novel, galeri cosplay - semua dalam satu platform.".to_string()
+    "Stream donghua, read comics & novels, browse cosplay galleries - all in one platform.".to_string()
 }
 
 fn default_static_dir() -> String {

@@ -52,12 +52,9 @@ impl AnichinAdapter {
             other => other,
         };
         if p == 1 {
-            format!("https://anichin.cafe/seri/?status=&type=&order={}", order)
+            format!("https://anichin.cafe/?s=&order={}", order)
         } else {
-            format!(
-                "https://anichin.cafe/seri/page/{}/?status=&type=&order={}",
-                p, order
-            )
+            format!("https://anichin.cafe/page/{}/?s=&order={}", p, order)
         }
     }
 

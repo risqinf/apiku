@@ -179,6 +179,112 @@ pub fn parse_novelid_search(base_url: &str, html: &str) -> Vec<SearchResultItem>
         .collect()
 }
 
+/// Extract the highest page number from a WordPress-style paginated listing.
+///
+/// Most of the HTML providers we scrape (Anichin/ts theme, Cosplaytele/Flatsome,
+/// NovelID) render a numeric pager. We look for the common markers and return
+/// the largest page number found.
+///
+/// We only return `Some(n)` when the page is a *numbered* pager (we saw at
+/// least two distinct page numbers — e.g. `1 2 3 … 40`). A "next-only" pager
+/// (just a `→ next` link pointing at `?page=2`) tells us nothing about the
+/// real total, so we return `None` and let the caller fall back to a
+/// "has next page?" heuristic. This avoids a misleading "Page 1 of 2".
+pub fn parse_html_total_pages(html: &str) -> Option<u32> {
+    let parser = HtmlParser::parse(html);
+    let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+
+    // WordPress numeric pagers + the common theme variants we hit. We target
+    // the individual page *links* (anchors / current-page spans), never the
+    // wrapping container — reading a container's combined text would splice
+    // "1","2","3" into a bogus "123".
+    let selectors = [
+        ".pagination a",
+        ".pagination span.current",
+        ".page-numbers a",
+        ".page-numbers span",
+        "a.page-numbers",
+        "span.page-numbers.current",
+        "a.page-number",
+        "span.page-number.current",
+        ".page-nav a",
+        ".nav-links a",
+        ".hpage a",
+        ".pagenavix a",
+        ".pagenavix span",
+        "nav.pagination a",
+        ".wp-pagenavi a",
+        ".wp-pagenavi span",
+    ];
+    for sel in selectors {
+        for el in parser.select_all(sel) {
+            // Skip non-leaf elements: if this node wraps other element nodes
+            // (e.g. a <ul> pager or an <a> that only contains an <i> icon),
+            // its combined text is not a single page number. Reading it would
+            // concatenate digits ("1"+"2"+"3" -> "123") or yield icon noise.
+            let has_child_element = el.children().any(|c| c.value().is_element());
+            if !has_child_element {
+                // 1) Numeric link text — only when the *entire* trimmed text
+                //    is a single number (e.g. "12").
+                let txt = el.text().collect::<Vec<_>>().join("");
+                let trimmed = txt.trim();
+                if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(n) = trimmed.parse::<u32>() {
+                        if n > 0 && n < 1_000_000 {
+                            seen.insert(n);
+                        }
+                    }
+                }
+            }
+            // 2) `?page=N` / `/page/N/` embedded in the href (covers the
+            //    "Last »" link that often has no numeric text).
+            if let Some(href) = el.value().attr("href") {
+                if let Some(n) = page_num_from_url(href) {
+                    seen.insert(n);
+                }
+            }
+        }
+    }
+
+    // Need at least two distinct page references to trust this as a real
+    // numbered pager (one value usually means a lone "next" link).
+    if seen.len() >= 2 {
+        seen.iter().last().copied()
+    } else {
+        None
+    }
+}
+
+/// Pull a page number out of a URL using the two common conventions:
+/// `?page=N` / `&page=N` and `/page/N/`.
+fn page_num_from_url(url: &str) -> Option<u32> {
+    use once_cell::sync::Lazy;
+    static QS_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"[?&]page=(\d+)").unwrap());
+    static PATH_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"/page/(\d+)").unwrap());
+    QS_RE
+        .captures(url)
+        .or_else(|| PATH_RE.captures(url))
+        .and_then(|c| c[1].parse::<u32>().ok())
+}
+
+/// nhentai's JSON search/listing responses carry `num_pages` and `per_page`
+/// at the top level. Returns `(num_pages, per_page)` when present.
+pub fn parse_nhentai_pagination(json: &serde_json::Value) -> (Option<u32>, Option<u32>) {
+    let num_pages = json
+        .get("num_pages")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .filter(|n| *n > 0);
+    let per_page = json
+        .get("per_page")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .filter(|n| *n > 0);
+    (num_pages, per_page)
+}
+
 /// Parse a JSON response from `/api/v2/search?query=...` into search items.
 /// nhentai's response shape is:
 /// `{ result: [ {id, media_id, english_title, japanese_title, thumbnail, num_pages, num_favorites, tag_ids, ...} ], num_pages, per_page, total }`

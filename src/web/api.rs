@@ -419,7 +419,14 @@ pub struct SearchEnvelopeData {
     pub query: String,
     pub source: String,
     pub page: u32,
+    /// Nominal items-per-page used for pagination math.
+    pub per_page: u32,
+    /// Number of items on *this* page (kept for back-compat with chip counts).
     pub total: usize,
+    /// Total number of pages upstream when known; `0` means unknown.
+    pub total_pages: u32,
+    /// Whether another page is expected after this one.
+    pub has_next: bool,
     pub items: Vec<SearchItemDto>,
 }
 
@@ -615,7 +622,7 @@ pub fn api_endpoint_docs() -> Vec<EndpointDoc> {
         EndpointDoc {
             method: "GET",
             path: "/api/v1/search?q={query}&source={all|manga|donghua|cosplay|nhentai|novel}&page={n}",
-            description: "Cross-provider search. nhentai accepts `[tag]` syntax in q.",
+            description: "Cross-provider search (paginated: returns page/per_page/total_pages/has_next). nhentai accepts `[tag]` syntax in q.",
         },
         EndpointDoc {
             method: "GET",
@@ -849,9 +856,18 @@ async fn run_search(
     let results = futures::future::join_all(futures).await;
 
     let mut items = Vec::new();
+    // Aggregate pagination across providers: the overall result set has a
+    // "next page" if *any* provider does, and the total page count is the max
+    // any single provider reports (so the pager can reach the deepest source).
+    let mut agg_total_pages: Option<u32> = None;
+    let mut agg_has_next = false;
     for (_, r) in results {
-        if let Ok(list) = r {
-            for raw in list {
+        if let Ok(single) = r {
+            if let Some(tp) = single.total_pages {
+                agg_total_pages = Some(agg_total_pages.map_or(tp, |cur| cur.max(tp)));
+            }
+            agg_has_next = agg_has_next || single.has_next;
+            for raw in single.items {
                 items.push(raw_search_to_dto(state, raw));
             }
         }
@@ -870,14 +886,28 @@ async fn run_search(
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let items: Vec<SearchItemDto> = scored.into_iter().map(|(_, _, it)| it).collect();
 
+    // If a provider gave us a full page but no explicit page count, assume at
+    // least one more page exists so the UI shows a "Next" affordance.
+    let has_next = agg_total_pages
+        .map(|tp| page < tp)
+        .unwrap_or(agg_has_next);
+
     Ok(SearchEnvelopeData {
         query: query.to_string(),
         source: source.to_string(),
         page,
+        per_page: SEARCH_PER_PAGE,
         total: items.len(),
+        total_pages: agg_total_pages.unwrap_or(0),
+        has_next,
         items,
     })
 }
+
+/// Nominal page size we advertise for search results. Providers paginate
+/// independently upstream; this is only used by the client to render a
+/// numeric pager when an exact page count is unknown.
+const SEARCH_PER_PAGE: u32 = 25;
 
 /// Lowercase + collapse non-alphanumeric runs to single spaces.
 fn normalize_for_match(s: &str) -> String {
@@ -935,33 +965,65 @@ fn relevance_score(title: &str, q_norm: &str, q_terms: &[String]) -> i64 {
     score
 }
 
+/// One provider's search result page plus what we could learn about its
+/// pagination. `total_pages` is `None` when the provider doesn't expose it;
+/// `has_next` is a best-effort hint (e.g. a full page of results) used as a
+/// fallback when the page count is unknown.
+struct SingleSearch {
+    items: Vec<SearchResultItem>,
+    total_pages: Option<u32>,
+    has_next: bool,
+}
+
 async fn run_single_search(
     state: &ApiState,
     source: SearchSource,
     query: &str,
     page: u32,
-) -> Result<Vec<SearchResultItem>, String> {
+) -> Result<SingleSearch, String> {
     if matches!(source, SearchSource::Mangaball) {
-        return search_mangaball(state, query).await;
+        // Mangaball search returns the full match set in one response (no
+        // upstream paging), so everything is page 1.
+        let items = search_mangaball(state, query).await?;
+        return Ok(SingleSearch {
+            items,
+            total_pages: Some(1),
+            has_next: false,
+        });
     }
     if matches!(source, SearchSource::Nhentai) {
-        return search_nhentai_sorted(state, query, page, "").await;
+        let (items, total_pages) = search_nhentai_sorted(state, query, page, "").await?;
+        let has_next = total_pages.map(|tp| page < tp).unwrap_or(!items.is_empty());
+        return Ok(SingleSearch {
+            items,
+            total_pages,
+            has_next,
+        });
     }
     let url = match build_search_url(source, query, page) {
         Some(u) => u,
         None => return Err(format!("no search URL for source {:?}", source)),
     };
-    let items = fetch_and_parse_html_listing(state, source, &url).await?;
+    let (items, total_pages) = fetch_and_parse_html_listing(state, source, &url).await?;
     // Cosplaytele's WordPress search is loose and the page also embeds
     // recommendation carousels. We already strip the carousels during parsing;
     // here we additionally keep only results that actually match the query
     // (every query word must appear in the title or the cat-label snippet,
     // which carries the cosplayer name). This gives high-precision results
     // like "xiaoyaoyaoyao" -> only xiaoyaoyaoyao posts.
-    if matches!(source, SearchSource::Cosplaytele) {
-        return Ok(filter_relevant(items, query));
-    }
-    Ok(items)
+    let items = if matches!(source, SearchSource::Cosplaytele) {
+        filter_relevant(items, query)
+    } else {
+        items
+    };
+    let has_next = total_pages
+        .map(|tp| page < tp)
+        .unwrap_or(!items.is_empty());
+    Ok(SingleSearch {
+        items,
+        total_pages,
+        has_next,
+    })
 }
 
 /// Keep only items whose title/snippet contain *all* whitespace-delimited
@@ -1002,11 +1064,14 @@ fn filter_relevant(items: Vec<SearchResultItem>, query: &str) -> Vec<SearchResul
 /// your browser", short bodies), retry once after a short delay. This makes
 /// HTML providers (Anichin, Cosplaytele, NovelID) resilient to transient
 /// "200 OK but empty" responses.
+///
+/// Returns the parsed items plus the total page count parsed from the
+/// upstream pager (`None` when there is no pager / single page).
 async fn fetch_and_parse_html_listing(
     state: &ApiState,
     source: SearchSource,
     url: &str,
-) -> Result<Vec<SearchResultItem>, String> {
+) -> Result<(Vec<SearchResultItem>, Option<u32>), String> {
     let html = state
         .engine
         .fetch_html(url)
@@ -1014,7 +1079,8 @@ async fn fetch_and_parse_html_listing(
         .map_err(|e| e.to_string())?;
     let items = parse_search_html(source, url, &html);
     if !items.is_empty() {
-        return Ok(items);
+        let pages = crate::web::search::parse_html_total_pages(&html);
+        return Ok((items, pages));
     }
     // Zero items: distinguish a genuinely-empty listing from an anti-bot
     // interstitial / truncated body. Retry once when the body looks suspect.
@@ -1026,9 +1092,11 @@ async fn fetch_and_parse_html_listing(
             .fetch_html(url)
             .await
             .map_err(|e| e.to_string())?;
-        return Ok(parse_search_html(source, url, &html2));
+        let items2 = parse_search_html(source, url, &html2);
+        let pages = crate::web::search::parse_html_total_pages(&html2);
+        return Ok((items2, pages));
     }
-    Ok(items)
+    Ok((items, None))
 }
 
 /// Heuristic: does this HTML look like an anti-bot challenge or a broken /
@@ -1053,7 +1121,7 @@ async fn search_nhentai(
     state: &ApiState,
     query: &str,
     page: u32,
-) -> Result<Vec<SearchResultItem>, String> {
+) -> Result<(Vec<SearchResultItem>, Option<u32>), String> {
     search_nhentai_sorted(state, query, page, "").await
 }
 
@@ -1062,14 +1130,15 @@ async fn search_nhentai_sorted(
     query: &str,
     page: u32,
     sort: &str,
-) -> Result<Vec<SearchResultItem>, String> {
+) -> Result<(Vec<SearchResultItem>, Option<u32>), String> {
     let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_search_sorted(
         query,
         page.max(1),
         sort,
     );
     let body = call_nhentai_search_api(state, &url).await?;
-    Ok(parse_nhentai_search(&body))
+    let (total_pages, _per_page) = crate::web::search::parse_nhentai_pagination(&body);
+    Ok((parse_nhentai_search(&body), total_pages))
 }
 
 async fn call_nhentai_search_api(state: &ApiState, url: &str) -> Result<serde_json::Value, String> {
@@ -1222,13 +1291,20 @@ pub async fn browse(
     let arc = state
         .search_cache
         .try_get_with(cache_key, async move {
-            let items = run_browse(&state_clone, &provider_lc, &feed, p, size).await?;
+            let br = run_browse(&state_clone, &provider_lc, &feed, p, size).await?;
+            let has_next = br
+                .total_pages
+                .map(|tp| p < tp)
+                .unwrap_or(br.has_next);
             Ok::<Arc<SearchEnvelopeData>, String>(Arc::new(SearchEnvelopeData {
                 query: String::new(),
                 source: provider_lc,
                 page: p,
-                total: items.len(),
-                items,
+                per_page: br.per_page,
+                total: br.items.len(),
+                total_pages: br.total_pages.unwrap_or(0),
+                has_next,
+                items: br.items,
             }))
         })
         .await;
@@ -1258,13 +1334,24 @@ pub async fn browse(
     }
 }
 
+/// A browse feed page plus pagination info parsed from the provider.
+struct BrowseResult {
+    items: Vec<SearchItemDto>,
+    /// Nominal items-per-page used for client pager math.
+    per_page: u32,
+    /// Total pages upstream when known (`None` otherwise).
+    total_pages: Option<u32>,
+    /// Best-effort "is there a next page?" hint when the count is unknown.
+    has_next: bool,
+}
+
 async fn run_browse(
     state: &ApiState,
     provider: &str,
     feed: &str,
     page: u32,
     size: Option<u32>,
-) -> Result<Vec<SearchItemDto>, String> {
+) -> Result<BrowseResult, String> {
     match provider {
         "mangaball" | "manga" => browse_mangaball(state, feed, page, size).await,
         "anichin" | "donghua" => browse_anichin(state, feed, page).await,
@@ -1280,7 +1367,7 @@ async fn browse_otakudesu(
     state: &ApiState,
     feed: &str,
     page: u32,
-) -> Result<Vec<SearchItemDto>, String> {
+) -> Result<BrowseResult, String> {
     let url = crate::adapters::otakudesu::OtakudesuAdapter::browse_url(feed, page);
     let html = state
         .engine
@@ -1288,7 +1375,8 @@ async fn browse_otakudesu(
         .await
         .map_err(|e| e.to_string())?;
     let hits = crate::adapters::otakudesu::OtakudesuAdapter::parse_browse(&url, &html);
-    Ok(hits
+    let total_pages = crate::web::search::parse_html_total_pages(&html);
+    let items: Vec<SearchItemDto> = hits
         .into_iter()
         .map(|hit| {
             let raw = SearchResultItem {
@@ -1302,69 +1390,108 @@ async fn browse_otakudesu(
             };
             raw_search_to_dto(state, raw)
         })
-        .collect())
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
 }
 
 async fn browse_anichin(
     state: &ApiState,
     feed: &str,
     page: u32,
-) -> Result<Vec<SearchItemDto>, String> {
+) -> Result<BrowseResult, String> {
     let url = crate::adapters::anichin::AnichinAdapter::browse_url(feed, page);
-    let raw = fetch_and_parse_html_listing(state, SearchSource::Anichin, &url).await?;
-    Ok(raw
+    let (raw, total_pages) =
+        fetch_and_parse_html_listing(state, SearchSource::Anichin, &url).await?;
+    let items: Vec<SearchItemDto> = raw
         .into_iter()
         .map(|r| raw_search_to_dto(state, r))
-        .collect())
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
 }
 
 async fn browse_cosplaytele(
     state: &ApiState,
     feed: &str,
     page: u32,
-) -> Result<Vec<SearchItemDto>, String> {
+) -> Result<BrowseResult, String> {
     let url = crate::adapters::cosplaytele::CosplayteleAdapter::browse_url(feed, page);
-    let raw = fetch_and_parse_html_listing(state, SearchSource::Cosplaytele, &url).await?;
-    Ok(raw
+    let (raw, total_pages) =
+        fetch_and_parse_html_listing(state, SearchSource::Cosplaytele, &url).await?;
+    let items: Vec<SearchItemDto> = raw
         .into_iter()
         .map(|r| raw_search_to_dto(state, r))
-        .collect())
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
 }
 
 async fn browse_nhentai(
     state: &ApiState,
     feed: &str,
     page: u32,
-) -> Result<Vec<SearchItemDto>, String> {
+) -> Result<BrowseResult, String> {
     let sort = crate::adapters::nhentai::NhentaiAdapter::feed_to_sort(feed);
     let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_popular(page, sort);
     let body = call_nhentai_search_api(state, &url).await?;
+    let (total_pages, per_page) = crate::web::search::parse_nhentai_pagination(&body);
     let raw = parse_nhentai_search(&body);
-    Ok(raw
+    let items: Vec<SearchItemDto> = raw
         .into_iter()
         .map(|r| raw_search_to_dto(state, r))
-        .collect())
+        .collect();
+    let has_next = total_pages.map(|tp| page < tp).unwrap_or(!items.is_empty());
+    Ok(BrowseResult {
+        per_page: per_page.unwrap_or_else(|| items.len().max(1) as u32),
+        total_pages,
+        has_next,
+        items,
+    })
 }
 
 async fn browse_novelid(
     state: &ApiState,
     feed: &str,
     page: u32,
-) -> Result<Vec<SearchItemDto>, String> {
+) -> Result<BrowseResult, String> {
     let url = crate::adapters::novelid::NovelidAdapter::browse_url(feed, page);
     // NovelID uses the same card markup as its search results.
-    let raw = fetch_and_parse_novelid_listing(state, &url).await?;
-    Ok(raw
+    let (raw, total_pages) = fetch_and_parse_novelid_listing(state, &url).await?;
+    let items: Vec<SearchItemDto> = raw
         .into_iter()
         .map(|r| raw_search_to_dto(state, r))
-        .collect())
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
 }
 
 /// Like `fetch_and_parse_html_listing` but for NovelID's card markup.
+/// Returns the parsed items plus the upstream total page count when present.
 async fn fetch_and_parse_novelid_listing(
     state: &ApiState,
     url: &str,
-) -> Result<Vec<SearchResultItem>, String> {
+) -> Result<(Vec<SearchResultItem>, Option<u32>), String> {
     let html = state
         .engine
         .fetch_html(url)
@@ -1372,7 +1499,8 @@ async fn fetch_and_parse_novelid_listing(
         .map_err(|e| e.to_string())?;
     let items = crate::web::search::parse_novelid_search(url, &html);
     if !items.is_empty() {
-        return Ok(items);
+        let pages = crate::web::search::parse_html_total_pages(&html);
+        return Ok((items, pages));
     }
     if looks_like_interstitial(&html) {
         tracing::warn!(url = %url, bytes = html.len(), "empty NovelID listing looked like an interstitial; retrying once");
@@ -1382,21 +1510,31 @@ async fn fetch_and_parse_novelid_listing(
             .fetch_html(url)
             .await
             .map_err(|e| e.to_string())?;
-        return Ok(crate::web::search::parse_novelid_search(url, &html2));
+        let items2 = crate::web::search::parse_novelid_search(url, &html2);
+        let pages = crate::web::search::parse_html_total_pages(&html2);
+        return Ok((items2, pages));
     }
-    Ok(items)
+    Ok((items, None))
 }
 
 /// Mangaball browse: POSTs to `/api/v1/title/search/` with a `search_type`
 /// derived from the feed name. The response JSON shape mirrors smart-search.
+///
+/// Mangaball returns the whole feed in one response (no upstream paging), so
+/// we request a generous cap, then slice the requested window locally and
+/// derive an exact page count from the full result set.
 async fn browse_mangaball(
     state: &ApiState,
     feed: &str,
     page: u32,
     size: Option<u32>,
-) -> Result<Vec<SearchItemDto>, String> {
+) -> Result<BrowseResult, String> {
     let stype = crate::adapters::mangaball::MangaballAdapter::browse_search_type(feed);
-    let limit = (size.unwrap_or(30).clamp(5, 60) as usize) * (page.max(1) as usize);
+    let s = size.unwrap_or(30).clamp(5, 60) as usize;
+    // Mangaball returns the whole feed in one response (no upstream paging).
+    // Fetch a fixed generous cap so the page count is stable across pages and
+    // we can paginate locally with an accurate total.
+    let limit = 300usize;
 
     let home_url = "https://mangaball.net/";
     let home_html = state
@@ -1409,7 +1547,7 @@ async fn browse_mangaball(
         .and_then(|re| re.captures(&home_html).map(|c| c[1].to_string()))
     {
         Some(c) => c,
-        None => return Ok(Vec::new()),
+        None => return Ok(empty_browse()),
     };
     let mut adapter_headers = std::collections::HashMap::new();
     adapter_headers.insert("X-CSRF-TOKEN".to_string(), csrf);
@@ -1438,7 +1576,7 @@ async fn browse_mangaball(
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Ok(Vec::new());
+        return Ok(empty_browse());
     }
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 
@@ -1446,20 +1584,44 @@ async fn browse_mangaball(
     // also see shapes where `data` is a flat array. Reuse the existing
     // search parser to handle both, then slice the page window.
     let raw = crate::web::search::parse_mangaball_search(&body);
-    // Crude pagination: take items [(page-1)*size .. page*size]
-    let s = size.unwrap_or(30).clamp(5, 60) as usize;
+    let total_items = raw.len();
+    // Page window [(page-1)*size .. page*size].
     let start = ((page.max(1) - 1) as usize) * s;
-    let end = (start + s).min(raw.len());
-    let slice = if start >= raw.len() {
+    let end = (start + s).min(total_items);
+    let slice = if start >= total_items {
         &[]
     } else {
         &raw[start..end]
     };
-    Ok(slice
+    let items: Vec<SearchItemDto> = slice
         .iter()
         .cloned()
         .map(|r| raw_search_to_dto(state, r))
-        .collect())
+        .collect();
+    let tp = if total_items == 0 {
+        1
+    } else {
+        total_items.div_ceil(s)
+    };
+    let total_pages = Some(tp as u32);
+    let has_next = (page as usize) < tp;
+    
+    Ok(BrowseResult {
+        per_page: s as u32,
+        total_pages,
+        has_next,
+        items,
+    })
+}
+
+/// An empty browse page (used when an upstream prerequisite is missing).
+fn empty_browse() -> BrowseResult {
+    BrowseResult {
+        items: Vec::new(),
+        per_page: 1,
+        total_pages: Some(1),
+        has_next: false,
+    }
 }
 
 // ---- Manga ----------------------------------------------------------------

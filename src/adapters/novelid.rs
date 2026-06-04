@@ -327,7 +327,7 @@ impl NovelidAdapter {
         }
 
         // Prev / next nav
-        let prev_url = parser
+        let mut prev_url = parser
             .attr(".watch-pre a", "href")
             .filter(|s| !s.is_empty() && s != "#")
             .map(|s| resolve_url(base_url, &s));
@@ -345,6 +345,14 @@ impl NovelidAdapter {
             .captures(base_url)
             .and_then(|c| c[2].parse::<u32>().ok())
             .unwrap_or(0);
+
+        // Fallback: NovelID sometimes omits or leaves the previous link as '#'
+        // If we are on chapter > 1, we can safely synthesise the previous chapter URL.
+        if prev_url.is_none() && chapter_number > 1 {
+            if let Some(ref s_url) = series_url {
+                prev_url = Some(format!("{}/bab/{}/", s_url, chapter_number - 1));
+            }
+        }
 
         Some(NovelChapter {
             series_title,

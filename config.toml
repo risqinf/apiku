@@ -68,7 +68,7 @@ Accept-Language = "en-US,en;q=0.9,id;q=0.8"
 site_name = "apiku"
 
 # Tagline shown on the home hero banner. (env: APIKU_TAGLINE)
-tagline = "Streaming donghua, baca komik & novel, galeri cosplay - semua dalam satu platform."
+tagline = "Stream donghua, read comics & novels, browse cosplay galleries - all in one platform."
 
 # Custom logo. Kosongkan untuk auto-deteksi / logo bawaan.
 #   - Auto-deteksi: cukup taruh file `logo.*` atau `favicon.*` di folder
