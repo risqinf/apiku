@@ -76,7 +76,7 @@ pub async fn index(State(state): State<ApiState>) -> Html<String> {
         esc(web.logo_url.trim())
     };
     let desc = if tagline.is_empty() {
-        "Streaming donghua, baca komik & novel, galeri cosplay - semua dalam satu platform."
+        "Stream donghua, read comics & novels, browse cosplay galleries - all in one platform."
             .to_string()
     } else {
         esc(tagline)

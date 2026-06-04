@@ -255,6 +255,8 @@ svg { display: block; }
 .drawer nav a:hover { background: var(--bg-elev); }
 .drawer nav a.active { background: var(--grad); color: #fff; box-shadow: var(--shadow-brand); }
 .drawer .dsep { height: 1px; background: var(--border); margin: 14px 0; }
+.navmore-menu .dsep { height: 1px; background: var(--border); margin: 8px 0; }
+.navmore-menu .switch { width: 100%; font-size: 13px; padding: 9px 12px; }
 .drawer .drow { display: flex; flex-direction: column; gap: 10px; }
 .drawer .drow .icon-btn { flex: 1; }
 
@@ -482,7 +484,26 @@ a.pill.link:hover { color: #fff; background: linear-gradient(120deg, var(--brand
 .ep-btn .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
 
 /* Pager */
-.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 20px 0; color: var(--muted); font-size: 13px; }
+.pager { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; margin: 28px 0; color: var(--muted); font-size: 13px; }
+
+/* nhentai-style numbered pager */
+.page-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; }
+.page-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 38px; height: 38px; padding: 0 11px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 700; font-size: 13.5px;
+  transition: border-color .15s, color .15s, background .15s, transform .12s;
+}
+.page-btn:hover { border-color: var(--brand); color: var(--brand); transform: translateY(-1px); }
+.page-btn.active { background: var(--grad); color: #fff; border-color: transparent; box-shadow: var(--shadow-brand); cursor: default; }
+.page-btn.active:hover { transform: none; }
+.page-btn.disabled { opacity: .4; pointer-events: none; }
+.page-ellipsis { display: inline-flex; align-items: flex-end; padding: 0 4px; height: 38px; color: var(--muted); font-weight: 700; }
+.page-status { color: var(--muted); font-size: 12.5px; }
 
 /* ---------- Player (donghua) ---------- */
 .player-wrap { background: #000; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); margin-bottom: 16px; }
@@ -505,11 +526,26 @@ a.pill.link:hover { color: #fff; background: linear-gradient(120deg, var(--brand
 .reader-bar .reader-title { font-weight: 800; font-size: 16px; letter-spacing: -0.3px; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .reader-bar .reader-title::before { content: ""; width: 9px; height: 22px; border-radius: 4px; background: linear-gradient(var(--brand), var(--brand-2)); flex: none; }
 .reader { max-width: 860px; margin: 0 auto; }
-.reader-shell:fullscreen .reader { max-width: 1000px; padding: 0 8px 40px; }
+/* Fullscreen: fill the whole viewport width edge-to-edge so there are no dark
+   bars on the sides — the page images span the full screen. */
+.reader-shell:fullscreen .reader { max-width: 100%; width: 100%; padding: 0 0 40px; }
 /* Natural page sizing: do not force a ratio; just cap min-height while loading. */
-.reader img { width: 100%; height: auto; margin: 0 auto 3px; background: var(--bg-elev); border-radius: 2px; }
+.reader img { width: 100%; height: auto; margin: 0 auto 3px; background: var(--bg-elev); border-radius: 2px; display: block; }
+/* In fullscreen each page fills the full width with no gaps/rounding. */
+.reader-shell:fullscreen .reader img { width: 100%; margin: 0; border-radius: 0; }
 .reader-nav { position: sticky; bottom: 0; display: flex; gap: 10px; padding: 12px; background: var(--bg-soft); border-top: 1px solid var(--border); justify-content: center; }
 .reader-shell:fullscreen .reader-nav { padding: 12px 16px; }
+/* Hide the bottom nav entirely while reading (chapters auto-advance). */
+.reader-nav:empty { display: none; }
+
+/* Chapter separator + loading states for infinity scroll */
+.ch-separator { display: flex; align-items: center; gap: 14px; margin: 48px 0 24px; padding: 0 12px; }
+.ch-sep-line { flex: 1; height: 1px; background: var(--border); }
+.ch-sep-label { font-weight: 800; font-size: 15px; color: var(--brand); white-space: nowrap; }
+.ch-loading-notice { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 32px 16px; color: var(--muted); font-size: 14px; font-weight: 600; }
+.ch-loading-notice .spinner { width: 22px; height: 22px; margin: 0; }
+.ch-load-err { color: var(--brand-3); text-align: center; }
+.ch-load-err a { color: var(--brand); font-weight: 700; }
 
 /* ---------- Novel reader ---------- */
 .novel-body { max-width: 720px; margin: 0 auto; font-size: 18px; line-height: 1.95; color: var(--text); }
