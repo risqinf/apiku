@@ -2,12 +2,12 @@
 
 [![CI](https://github.com/risqinf/apiku/actions/workflows/ci.yml/badge.svg)](https://github.com/risqinf/apiku/actions/workflows/ci.yml)
 [![Release](https://github.com/risqinf/apiku/actions/workflows/release.yml/badge.svg)](https://github.com/risqinf/apiku/actions/workflows/release.yml)
-[![Live](https://img.shields.io/website?url=https%3A%2F%2Fapi.risqinf.web.id%2Fapi%2Fv1%2Fhealth&label=api.risqinf.web.id)](https://api.risqinf.web.id)
+[![Live](https://img.shields.io/website?url=https%3A%2F%2Fapi.farellvpn.engineer%2Fapi%2Fv1%2Fhealth&label=api.farellvpn.engineer)](https://api.farellvpn.engineer)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > RESTful scraping API for **Mangaball**, **Anichin**, **Otakudesu**, **Cosplaytele**, **nhentai**, and **NovelID** — one HTTP service that other developers can build manga readers, anime & donghua players, cosplay galleries, doujinshi browsers, and novel readers against, without ever seeing the upstream URLs.
 
-- **Live demo:** <https://api.risqinf.web.id> (hosted on AWS — same binary, same endpoints)
+- **Live demo:** <https://api.farellvpn.engineer> (hosted on AWS — same binary, same endpoints)
 - **Repo:** <https://github.com/risqinf/apiku>
 - **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
 - **Author:** [@risqinf](https://github.com/risqinf)
@@ -77,15 +77,15 @@ Open `http://127.0.0.1:3000/` for the **web app** — a full streaming/reading p
 
 ### Try it without building
 
-The same binary is hosted at **<https://api.risqinf.web.id>** (AWS). Every endpoint shown in this README also works there:
+The same binary is hosted at **<https://api.farellvpn.engineer>** (AWS). Every endpoint shown in this README also works there:
 
 ```bash
-curl 'https://api.risqinf.web.id/api/v1/info'
-curl 'https://api.risqinf.web.id/api/v1/search?q=Martial+Universe&source=novel'
-curl 'https://api.risqinf.web.id/api/v1/browse/nhentai?feed=popular-today'
+curl 'https://api.farellvpn.engineer/api/v1/info'
+curl 'https://api.farellvpn.engineer/api/v1/search?q=Martial+Universe&source=novel'
+curl 'https://api.farellvpn.engineer/api/v1/browse/nhentai?feed=popular-today'
 ```
 
-The tester website is also live at <https://api.risqinf.web.id/>.
+The tester website is also live at <https://api.farellvpn.engineer/>.
 
 ### Pre-built binaries
 
@@ -602,7 +602,7 @@ All examples make the same request: search "one piece" on Mangaball.
 curl 'http://127.0.0.1:3000/api/v1/search?q=one+piece&source=manga'
 
 # Live demo (same shape, hosted on AWS)
-curl 'https://api.risqinf.web.id/api/v1/search?q=one+piece&source=manga' | jq .
+curl 'https://api.farellvpn.engineer/api/v1/search?q=one+piece&source=manga' | jq .
 ```
 
 ### JavaScript (browser / Node 18+)
@@ -983,12 +983,12 @@ Anything in `static_dir` (default `public/`) is served at the site root for a si
 
 ## Deployment
 
-The reference deployment runs on AWS at <https://api.risqinf.web.id>. Architecture:
+The reference deployment runs on AWS at <https://api.farellvpn.engineer>. Architecture:
 
 - **Compute:** EC2 instance (`apiku serve --bind 127.0.0.1:3000` behind systemd)
 - **Reverse proxy:** nginx terminates TLS, forwards `/` and `/api/v1/*` and `/img` to the local apiku
 - **TLS:** Let's Encrypt via Certbot, auto-renewed
-- **Domain:** `api.risqinf.web.id` → AWS via Route 53 / external DNS provider
+- **Domain:** `api.farellvpn.engineer` → AWS via Route 53 / external DNS provider
 - **Logs:** systemd journald (`apiku --log-format json --log-file /var/log/apiku/apiku.log`)
 - **Image proxy:** the host allowlist already covers every upstream CDN we use, so no extra firewall rules are needed
 
@@ -1018,10 +1018,10 @@ WantedBy=multi-user.target
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name api.risqinf.web.id;
+    server_name api.farellvpn.engineer;
 
-    ssl_certificate     /etc/letsencrypt/live/api.risqinf.web.id/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.risqinf.web.id/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/api.farellvpn.engineer/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.farellvpn.engineer/privkey.pem;
 
     # Long-lived image-proxy responses can be safely cached at the edge
     location /img {
