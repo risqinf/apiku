@@ -259,10 +259,8 @@ pub fn parse_html_total_pages(html: &str) -> Option<u32> {
 /// `?page=N` / `&page=N` and `/page/N/`.
 fn page_num_from_url(url: &str) -> Option<u32> {
     use once_cell::sync::Lazy;
-    static QS_RE: Lazy<regex::Regex> =
-        Lazy::new(|| regex::Regex::new(r"[?&]page=(\d+)").unwrap());
-    static PATH_RE: Lazy<regex::Regex> =
-        Lazy::new(|| regex::Regex::new(r"/page/(\d+)").unwrap());
+    static QS_RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"[?&]page=(\d+)").unwrap());
+    static PATH_RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"/page/(\d+)").unwrap());
     QS_RE
         .captures(url)
         .or_else(|| PATH_RE.captures(url))

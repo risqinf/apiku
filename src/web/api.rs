@@ -888,9 +888,7 @@ async fn run_search(
 
     // If a provider gave us a full page but no explicit page count, assume at
     // least one more page exists so the UI shows a "Next" affordance.
-    let has_next = agg_total_pages
-        .map(|tp| page < tp)
-        .unwrap_or(agg_has_next);
+    let has_next = agg_total_pages.map(|tp| page < tp).unwrap_or(agg_has_next);
 
     Ok(SearchEnvelopeData {
         query: query.to_string(),
@@ -1016,9 +1014,7 @@ async fn run_single_search(
     } else {
         items
     };
-    let has_next = total_pages
-        .map(|tp| page < tp)
-        .unwrap_or(!items.is_empty());
+    let has_next = total_pages.map(|tp| page < tp).unwrap_or(!items.is_empty());
     Ok(SingleSearch {
         items,
         total_pages,
@@ -1292,10 +1288,7 @@ pub async fn browse(
         .search_cache
         .try_get_with(cache_key, async move {
             let br = run_browse(&state_clone, &provider_lc, &feed, p, size).await?;
-            let has_next = br
-                .total_pages
-                .map(|tp| p < tp)
-                .unwrap_or(br.has_next);
+            let has_next = br.total_pages.map(|tp| p < tp).unwrap_or(br.has_next);
             Ok::<Arc<SearchEnvelopeData>, String>(Arc::new(SearchEnvelopeData {
                 query: String::new(),
                 source: provider_lc,
@@ -1363,11 +1356,7 @@ async fn run_browse(
     }
 }
 
-async fn browse_otakudesu(
-    state: &ApiState,
-    feed: &str,
-    page: u32,
-) -> Result<BrowseResult, String> {
+async fn browse_otakudesu(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
     let url = crate::adapters::otakudesu::OtakudesuAdapter::browse_url(feed, page);
     let html = state
         .engine
@@ -1400,11 +1389,7 @@ async fn browse_otakudesu(
     })
 }
 
-async fn browse_anichin(
-    state: &ApiState,
-    feed: &str,
-    page: u32,
-) -> Result<BrowseResult, String> {
+async fn browse_anichin(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
     let url = crate::adapters::anichin::AnichinAdapter::browse_url(feed, page);
     let (raw, total_pages) =
         fetch_and_parse_html_listing(state, SearchSource::Anichin, &url).await?;
@@ -1442,11 +1427,7 @@ async fn browse_cosplaytele(
     })
 }
 
-async fn browse_nhentai(
-    state: &ApiState,
-    feed: &str,
-    page: u32,
-) -> Result<BrowseResult, String> {
+async fn browse_nhentai(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
     let sort = crate::adapters::nhentai::NhentaiAdapter::feed_to_sort(feed);
     let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_popular(page, sort);
     let body = call_nhentai_search_api(state, &url).await?;
@@ -1465,11 +1446,7 @@ async fn browse_nhentai(
     })
 }
 
-async fn browse_novelid(
-    state: &ApiState,
-    feed: &str,
-    page: u32,
-) -> Result<BrowseResult, String> {
+async fn browse_novelid(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
     let url = crate::adapters::novelid::NovelidAdapter::browse_url(feed, page);
     // NovelID uses the same card markup as its search results.
     let (raw, total_pages) = fetch_and_parse_novelid_listing(state, &url).await?;
@@ -1605,7 +1582,7 @@ async fn browse_mangaball(
     };
     let total_pages = Some(tp as u32);
     let has_next = (page as usize) < tp;
-    
+
     Ok(BrowseResult {
         per_page: s as u32,
         total_pages,
