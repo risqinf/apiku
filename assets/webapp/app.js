@@ -174,6 +174,9 @@
     arrow:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
     expand:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>',
     compress:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/></svg>',
+    // Favorite control icon. Outline by default; the .fav-btn.on /
+    // [aria-pressed="true"] CSS fills it (fill: currentColor) for the saved state.
+    heart:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-4.5-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 6c-2.5 4.5-9.5 9-9.5 9z"/></svg>',
   };
 
   // ---- Provider config ---------------------------------------------------
@@ -209,6 +212,479 @@
   applyTheme();
   const adultOn = () => store.adult;
   function providerVisible(kind){ const p = Object.values(PROVIDERS).find(x=>x.kind===kind); return p ? (!p.adult || adultOn()) : true; }
+
+  // ---- Personalization store (favorites / search / browsing history) ------
+  // Per-device, client-side store with graceful degradation. It manages three
+  // collections across two real backends plus an in-memory fallback:
+  //   - favorites       -> localStorage  (apiku.fav.v1)      sync
+  //   - search history  -> localStorage  (apiku.search.v1)   sync
+  //   - browsing history-> IndexedDB     (db "apiku")        async
+  // When a real backend is unavailable/disabled/failing we swap in the matching
+  // MemoryBackend, and every public method is wrapped so a thrown backend error
+  // degrades to a safe default ([], false, or a no-op) instead of breaking a
+  // render path (Req 6.3). Persisted blobs are version-tagged so the schema can
+  // evolve; unknown versions migrate to an empty collection (Req 6.1, 6.2).
+  //
+  // NOTE: backends, versioned schema, migration, init-time probing, and the
+  // safe-wrapping harness (task 2.1), the pure helpers (task 2.2), the
+  // favorites + search-history bodies (task 2.3), and the IndexedDB
+  // browsing-history bodies (task 2.4) are all in place.
+  const pstore = (function(){
+    const SCHEMA_VERSION = 1;
+    const KEYS = { fav: "apiku.fav.v1", search: "apiku.search.v1" };
+    const IDB  = { db: "apiku", version: 1, store: "history", keyPath: "opaqueId", index: "byTime", indexKey: "timestamp" };
+
+    // -- versioned blob wrapper + migration --------------------------------
+    // localStorage collections are stored as { v:1, items:[...] }.
+    function wrap(items){ return { v: SCHEMA_VERSION, items: Array.isArray(items) ? items : [] }; }
+    // Return a usable items array for a known version. Unknown/future/malformed
+    // versions degrade to an empty collection rather than throwing (Req 6.1).
+    function migrate(v, data){
+      if(v === SCHEMA_VERSION && data && Array.isArray(data.items)) return data.items.slice();
+      return [];
+    }
+
+    // -- safe wrappers: never let a backend error escape to a caller (Req 6.3)
+    function safe(fn, fallback){
+      return function(){
+        try { return fn.apply(this, arguments); }
+        catch(_){ return typeof fallback === "function" ? fallback() : fallback; }
+      };
+    }
+    function safeAsync(fn, fallback){
+      return async function(){
+        try { return await fn.apply(this, arguments); }
+        catch(_){ return typeof fallback === "function" ? fallback() : fallback; }
+      };
+    }
+
+    // -- pure helpers (task 2.2) -------------------------------------------
+    // Side-effect-free and total (never throw). Shared by the store methods
+    // (tasks 2.3/2.4) and the render/route code, and exposed on the returned
+    // object so the Node test harnesses (tasks 2.5+) can reach them. The
+    // persisted favorites/search/history method bodies layer on top of these.
+
+    // Searchable text of a search-history element. Accepts either a SearchEntry
+    // ({ query, norm, timestamp }) or a bare query string.
+    function entryQuery(e){
+      if(e && typeof e === "object") return e.query != null ? String(e.query) : "";
+      return e == null ? "" : String(e);
+    }
+
+    // filterSearches(list, text): case-insensitive substring filter over the
+    // search list, preserving original (most-recent-first) order. Blank text
+    // matches everything. Returns the matching subset (Req 2.4).
+    function filterSearches(list, text){
+      const arr = Array.isArray(list) ? list : [];
+      const needle = (text == null ? "" : String(text)).toLowerCase();
+      if(needle === "") return arr.slice();
+      return arr.filter(function(e){ return entryQuery(e).toLowerCase().indexOf(needle) !== -1; });
+    }
+
+    // visible(entries): drop entries whose kind is cosplay or doujin when the
+    // adult toggle is off; return the list unchanged when adult is on
+    // (Req 3.10, 4.7).
+    function visible(entries){
+      const arr = Array.isArray(entries) ? entries : [];
+      if(adultOn()) return arr.slice();
+      return arr.filter(function(e){
+        const k = e && e.kind;
+        return k !== "cosplay" && k !== "doujin";
+      });
+    }
+
+    // entryRoute(kind, id): canonical per-kind hash route. Every supported kind
+    // (anime, donghua, manga/comics, novel, cosplay, doujin) opens its detail
+    // view; readers/watch pages are reached from there, which keeps this a
+    // total, pure mapping with the id URL-encoded (Req 5.5). "comics" is an
+    // alias for the "manga" provider kind used by the detail route.
+    function entryRoute(kind, id){
+      const raw = (kind == null ? "" : String(kind)).trim().toLowerCase();
+      const k = raw === "comics" ? "manga" : raw;
+      return "#/detail/" + encodeURIComponent(k) + "/" + encodeURIComponent(id == null ? "" : String(id));
+    }
+
+    // Apply a key function defensively so a throwing keyFn cannot break a pure
+    // helper (keeps the helpers total).
+    function keyOf(keyFn, e){ try { return keyFn(e); } catch(_){ return undefined; } }
+
+    // dedupeMoveToFront(list, keyFn, entry): return a NEW list with any element
+    // sharing entry's key removed, and entry placed at the front (most-recent
+    // first). Shared by both recency-keyed collections — search history and
+    // browsing history (Req 2.2, 3.8).
+    function dedupeMoveToFront(list, keyFn, entry){
+      const arr = Array.isArray(list) ? list : [];
+      const fn = typeof keyFn === "function" ? keyFn : function(x){ return x; };
+      const key = keyOf(fn, entry);
+      const rest = arr.filter(function(e){ return keyOf(fn, e) !== key; });
+      return [entry].concat(rest);
+    }
+
+    // toggleMembership(list, keyFn, entry): pure favorite/membership toggle
+    // decision, separated from persistence (the persisted toggleFavorite lands
+    // in task 2.3). is-member -> remove (added=false); not-member -> add at the
+    // front (added=true). Returns a NEW { list, added } pair (Req 4.2, 4.3).
+    function toggleMembership(list, keyFn, entry){
+      const arr = Array.isArray(list) ? list : [];
+      const fn = typeof keyFn === "function" ? keyFn : function(x){ return x; };
+      const key = keyOf(fn, entry);
+      const present = arr.some(function(e){ return keyOf(fn, e) === key; });
+      if(present) return { list: arr.filter(function(e){ return keyOf(fn, e) !== key; }), added: false };
+      return { list: dedupeMoveToFront(arr, fn, entry), added: true };
+    }
+
+    // -- synchronous collection backends (favorites + search history) ------
+    // localStorage-backed: a single versioned blob per key.
+    function localBackend(key){
+      return {
+        kind: "local",
+        load(){
+          const raw = localStorage.getItem(key);
+          if(raw == null) return [];
+          let blob = null;
+          try { blob = JSON.parse(raw); } catch(_){ return []; }
+          return migrate(blob && blob.v, blob);
+        },
+        save(items){ localStorage.setItem(key, JSON.stringify(wrap(items))); },
+        clear(){ localStorage.removeItem(key); },
+      };
+    }
+    // in-memory fallback with the same (sync) interface.
+    function memBackend(){
+      let items = [];
+      return {
+        kind: "memory",
+        load(){ return items.slice(); },
+        save(next){ items = Array.isArray(next) ? next.slice() : []; },
+        clear(){ items = []; },
+      };
+    }
+
+    // -- asynchronous history backend (IndexedDB) --------------------------
+    function idbOpen(){
+      return new Promise(function(resolve, reject){
+        let req;
+        try { req = indexedDB.open(IDB.db, IDB.version); }
+        catch(e){ reject(e); return; }
+        req.onupgradeneeded = function(){
+          const db = req.result;
+          let os;
+          if(!db.objectStoreNames.contains(IDB.store)){
+            os = db.createObjectStore(IDB.store, { keyPath: IDB.keyPath });
+          } else {
+            os = req.transaction.objectStore(IDB.store);
+          }
+          if(os && !os.indexNames.contains(IDB.index)) os.createIndex(IDB.index, IDB.indexKey);
+        };
+        req.onsuccess = function(){ resolve(req.result); };
+        req.onerror   = function(){ reject(req.error || new Error("indexedDB open failed")); };
+      });
+    }
+    function idbBackend(){
+      let dbp = null;
+      function db(){ return dbp || (dbp = idbOpen()); }
+      function objStore(mode){ return db().then(function(d){ return d.transaction(IDB.store, mode).objectStore(IDB.store); }); }
+      function wait(req){ return new Promise(function(res, rej){ req.onsuccess=function(){ res(req.result); }; req.onerror=function(){ rej(req.error); }; }); }
+      return {
+        kind: "idb",
+        async getAll(){ return wait((await objStore("readonly")).getAll()); },
+        async put(entry){ return wait((await objStore("readwrite")).put(entry)); },
+        async delete(id){ return wait((await objStore("readwrite")).delete(id)); },
+        async clear(){ return wait((await objStore("readwrite")).clear()); },
+      };
+    }
+    // in-memory async history fallback with the same interface.
+    function memHistoryBackend(){
+      const map = new Map();
+      return {
+        kind: "memory",
+        async getAll(){ return Array.from(map.values()); },
+        async put(entry){ if(entry && entry.opaqueId != null) map.set(entry.opaqueId, entry); },
+        async delete(id){ map.delete(id); },
+        async clear(){ map.clear(); },
+      };
+    }
+
+    // -- backend probing + selection (graceful degradation, Req 6.3/6.5) ---
+    function localStorageWorks(){
+      try {
+        const k = "apiku.__probe";
+        localStorage.setItem(k, "1");
+        localStorage.removeItem(k);
+        return true;
+      } catch(_){ return false; }
+    }
+
+    const lsOk = localStorageWorks();
+    let favBackend     = lsOk ? localBackend(KEYS.fav)    : memBackend();
+    let searchBackend  = lsOk ? localBackend(KEYS.search) : memBackend();
+
+    // History starts on IndexedDB when present, then an async probe (a real
+    // open + read) swaps in the memory fallback if IndexedDB is unusable.
+    let historyBackend = (typeof indexedDB !== "undefined" && indexedDB) ? idbBackend() : memHistoryBackend();
+    (async function probeHistory(){
+      if(historyBackend.kind !== "idb") return;
+      try { await historyBackend.getAll(); }
+      catch(_){ historyBackend = memHistoryBackend(); }
+    })();
+
+    // Backend handles exposed for later tasks (2.3 favorites/search, 2.4 history).
+    // Getters so callers always see the current backend after a probe swap.
+    const backends = {
+      get fav(){ return favBackend; },
+      get search(){ return searchBackend; },
+      get history(){ return historyBackend; },
+    };
+
+    // -- caps / eviction limits (Req 2.9, 3.9; HISTORY used by task 2.4) ----
+    // Favorites are capped defensively; search history is an LRU capped at
+    // SEARCH; HISTORY (the FIFO HistoryCap) is consumed by the IndexedDB
+    // browsing-history bodies in task 2.4 but defined here as the single
+    // source of truth.
+    const CAPS = { FAVORITES: 1000, SEARCH: 50, HISTORY: 500 };
+
+    // ===== favorites (localStorage via backends.fav) — task 2.3 ===========
+    // Keyed by opaqueId, stored most-recent-first (front = most recent).
+    function favKey(e){ return e && e.opaqueId; }
+
+    // Build a persisted entry from a RichMetadata-shaped object, guaranteeing a
+    // timestamp (preserved when the caller already supplied one, Req 4.5).
+    function withTimestamp(meta){
+      const entry = Object.assign({}, (meta && typeof meta === "object") ? meta : {});
+      if(entry.timestamp == null) entry.timestamp = Date.now();
+      return entry;
+    }
+
+    function listFavoritesImpl(){ return backends.fav.load(); }
+
+    function isFavoriteImpl(opaqueId){
+      return listFavoritesImpl().some(function(e){ return favKey(e) === opaqueId; });
+    }
+
+    // Dedupe + move-to-front by opaqueId, then cap to CAPS.FAVORITES by
+    // trimming the oldest (tail) entries.
+    function addFavoriteImpl(meta){
+      const entry = withTimestamp(meta);
+      const next = dedupeMoveToFront(listFavoritesImpl(), favKey, entry).slice(0, CAPS.FAVORITES);
+      backends.fav.save(next);
+    }
+
+    // Remove only the entry matching opaqueId; everything else is preserved.
+    function removeFavoriteImpl(opaqueId){
+      const next = listFavoritesImpl().filter(function(e){ return favKey(e) !== opaqueId; });
+      backends.fav.save(next);
+    }
+
+    // Use the pure membership decision, persist the result, and return the new
+    // membership (true when the item is now a favorite — Req 4.2, 4.3).
+    function toggleFavoriteImpl(meta){
+      const entry = withTimestamp(meta);
+      const res = toggleMembership(listFavoritesImpl(), favKey, entry);
+      backends.fav.save(res.list.slice(0, CAPS.FAVORITES));
+      return res.added;
+    }
+
+    // Self-heal rewrite: replace the opaqueId of the matching favorite while
+    // preserving its metadata and list position (Req 7.4 helper).
+    function updateFavoriteIdImpl(oldId, newId){
+      const next = listFavoritesImpl().map(function(e){
+        return favKey(e) === oldId ? Object.assign({}, e, { opaqueId: newId }) : e;
+      });
+      backends.fav.save(next);
+    }
+
+    // ===== search history (localStorage via backends.search) — task 2.3 ===
+    // LRU, most-recent-first. Deduped by the normalized (trim+lowercase) query.
+    function normQuery(query){ return (query == null ? "" : String(query)).trim().toLowerCase(); }
+    function searchKey(e){ return e && e.norm; }
+
+    function listSearchesImpl(){ return backends.search.load(); }
+
+    // Normalize + store a SearchEntry, dedupe+move-to-front by normalized query,
+    // then tail-trim to CAPS.SEARCH so the least-recently-used queries are
+    // evicted (Req 2.1, 2.2, 2.9). Blank queries are ignored.
+    function recordSearchImpl(query){
+      const raw = (query == null ? "" : String(query)).trim();
+      const norm = raw.toLowerCase();
+      if(norm === "") return;
+      const entry = { query: raw, norm: norm, timestamp: Date.now() };
+      const next = dedupeMoveToFront(listSearchesImpl(), searchKey, entry).slice(0, CAPS.SEARCH);
+      backends.search.save(next);
+    }
+
+    // Store member that wraps the pure `filterSearches` helper over the current
+    // search list (most-recent-first order preserved — Req 2.4).
+    function filterSearchesImpl(text){ return filterSearches(listSearchesImpl(), text); }
+
+    // Remove only the entry whose normalized query matches (accepts either a
+    // raw query or an already-normalized key — Req 2.6).
+    function removeSearchImpl(query){
+      const norm = normQuery(query);
+      const next = listSearchesImpl().filter(function(e){ return searchKey(e) !== norm; });
+      backends.search.save(next);
+    }
+
+    function clearSearchesImpl(){ backends.search.clear(); }
+
+    // ===== browsing history (IndexedDB via backends.history) — task 2.4 ===
+    // Keyed by opaqueId (the IndexedDB keyPath); each record holds the full
+    // RichMetadata. All reads/writes are async. Writes go through `safeWrite`
+    // so a quota error triggers an eviction + single retry and any other
+    // failure degrades to a no-op — recordHistory is fire-and-forget from
+    // render paths and must never throw (Req 6.3, 6.4).
+    function historyKey(e){ return e && e.opaqueId; }
+
+    // Quota-error classification. Browsers signal a full store with a
+    // QuotaExceededError DOMException; we also accept the legacy numeric codes
+    // (22 in most engines, 1014 / NS_ERROR_DOM_QUOTA_REACHED in Firefox) and
+    // an IDB request's `.error` wrapper.
+    function isQuotaError(e){
+      if(!e) return false;
+      const name = e.name || (e.error && e.error.name);
+      if(name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED") return true;
+      const code = e.code != null ? e.code : (e.error && e.error.code);
+      return code === 22 || code === 1014;
+    }
+
+    // Oldest-first (ascending timestamp) copy; missing timestamps sort oldest.
+    // FIFO eviction always drops from the front of this ordering (Req 3.9).
+    function byTimestampAsc(entries){
+      const arr = Array.isArray(entries) ? entries : [];
+      return arr.slice().sort(function(a, b){
+        return ((a && a.timestamp) || 0) - ((b && b.timestamp) || 0);
+      });
+    }
+
+    // Evict the `n` oldest history entries (by ascending timestamp). Best-effort
+    // and total: used both by the FIFO cap and the quota-recovery path.
+    async function evictOldestHistory(n){
+      if(!(n > 0)) return;
+      const all = await backends.history.getAll();
+      const oldest = byTimestampAsc(all).slice(0, n);
+      for(const e of oldest){
+        const id = historyKey(e);
+        if(id != null) await backends.history.delete(id);
+      }
+    }
+
+    // safeWrite(writeFn): run an IndexedDB write; on a quota error free ~20% of
+    // the cap (oldest first) and retry the write once. If the retry still fails
+    // — or the original error was not a quota error — degrade to a no-op so a
+    // failing backend never throws into a render / fire-and-forget path
+    // (Req 6.3, 6.4).
+    async function safeWrite(writeFn){
+      try { return await writeFn(); }
+      catch(e){
+        if(isQuotaError(e)){
+          try {
+            await evictOldestHistory(Math.ceil(CAPS.HISTORY * 0.2));
+            return await writeFn();
+          } catch(_){ /* still failing after retry: degrade to no-op */ }
+        }
+        /* non-quota error: swallow to keep the app rendering */
+      }
+    }
+
+    // recordHistory(meta): upsert by opaqueId. Because the store's keyPath is
+    // opaqueId, `put` overwrites an existing record, so re-opening an item
+    // updates the same entry. We stamp a strictly-increasing timestamp (greater
+    // than any existing entry's, even within the same millisecond) so the
+    // re-opened item always moves to the most-recent/front position (Req 3.8).
+    // After the write, enforce the FIFO cap: when the count exceeds CAPS.HISTORY
+    // evict the oldest entries by timestamp until within the cap (Req 3.9).
+    // Entries without an opaqueId are ignored.
+    async function recordHistoryImpl(meta){
+      const base = (meta && typeof meta === "object") ? meta : {};
+      if(base.opaqueId == null) return;
+      const existing = await backends.history.getAll();
+      let maxTs = 0;
+      for(const e of existing){ const t = (e && e.timestamp) || 0; if(t > maxTs) maxTs = t; }
+      const entry = Object.assign({}, base, { timestamp: Math.max(Date.now(), maxTs + 1) });
+      await safeWrite(function(){ return backends.history.put(entry); });
+      const after = await backends.history.getAll();
+      if(after.length > CAPS.HISTORY) await evictOldestHistory(after.length - CAPS.HISTORY);
+    }
+
+    // listHistory(): most-recent-first (descending timestamp). The store has no
+    // inherent order, so we sort on read (Req 3.8 ordering).
+    async function listHistoryImpl(){
+      const all = await backends.history.getAll();
+      return byTimestampAsc(all).reverse();
+    }
+
+    // removeHistory(opaqueId): delete only the matching entry.
+    async function removeHistoryImpl(opaqueId){
+      if(opaqueId == null) return;
+      await safeWrite(function(){ return backends.history.delete(opaqueId); });
+    }
+
+    // clearHistory(): empty the store.
+    async function clearHistoryImpl(){
+      await safeWrite(function(){ return backends.history.clear(); });
+    }
+
+    // updateHistoryId(oldId, newId): self-heal rewrite. opaqueId is the keyPath,
+    // so changing it means re-keying — put the same metadata/timestamp under the
+    // new opaqueId, then delete the old record (Req 7.4 helper). put-before-
+    // delete avoids losing the entry if the second write fails. No-ops when the
+    // old entry is absent or the ids are missing/identical.
+    async function updateHistoryIdImpl(oldId, newId){
+      if(oldId == null || newId == null || oldId === newId) return;
+      const all = await backends.history.getAll();
+      const found = all.find(function(e){ return historyKey(e) === oldId; });
+      if(!found) return;
+      const moved = Object.assign({}, found, { opaqueId: newId });
+      await safeWrite(async function(){
+        await backends.history.put(moved);
+        await backends.history.delete(oldId);
+      });
+    }
+
+    // ---- public API ------------------------------------------------------
+    // Favorites + search history (2.3), browsing history (2.4), and `visible`
+    // (2.2) are live. Every method is wrapped so a backend failure can never
+    // throw into a render path (Req 6.3).
+    return {
+      // internals reused by later tasks + tests
+      SCHEMA_VERSION: SCHEMA_VERSION, KEYS: KEYS, IDB: IDB, CAPS: CAPS,
+      wrap: wrap, migrate: migrate, backends: backends,
+      _safe: safe, _safeAsync: safeAsync,
+
+      // pure helpers (task 2.2) — exposed for render/route code + test harnesses.
+      // The list-based filter is exposed as `_filterSearches` so it does not
+      // collide with the `filterSearches(text)` store member added in task 2.3
+      // (which will wrap this pure helper over `listSearches()`).
+      _filterSearches:  safe(filterSearches, function(){ return []; }),
+      entryRoute:       safe(entryRoute, ""),
+      dedupeMoveToFront: safe(dedupeMoveToFront, function(){ return []; }),
+      toggleMembership: safe(toggleMembership, function(){ return { list: [], added: false }; }),
+
+      // favorites (localStorage) — task 2.3
+      isFavorite:       safe(isFavoriteImpl, false),
+      addFavorite:      safe(addFavoriteImpl, undefined),
+      removeFavorite:   safe(removeFavoriteImpl, undefined),
+      toggleFavorite:   safe(toggleFavoriteImpl, false),
+      listFavorites:    safe(listFavoritesImpl, function(){ return []; }),
+      updateFavoriteId: safe(updateFavoriteIdImpl, undefined),
+
+      // search history (localStorage) — task 2.3
+      recordSearch:     safe(recordSearchImpl, undefined),
+      listSearches:     safe(listSearchesImpl, function(){ return []; }),
+      filterSearches:   safe(filterSearchesImpl, function(){ return []; }),
+      removeSearch:     safe(removeSearchImpl, undefined),
+      clearSearches:    safe(clearSearchesImpl, undefined),
+
+      // browsing history (IndexedDB) — task 2.4
+      recordHistory:    safeAsync(recordHistoryImpl, undefined),
+      listHistory:      safeAsync(listHistoryImpl, function(){ return []; }),
+      removeHistory:    safeAsync(removeHistoryImpl, undefined),
+      clearHistory:     safeAsync(clearHistoryImpl, undefined),
+      updateHistoryId:  safeAsync(updateHistoryIdImpl, undefined),
+
+      // adult-gated visibility filter (task 2.2)
+      visible:          safe(visible, function(){ return []; }),
+    };
+  })();
 
   // ---- Helpers ------------------------------------------------------------
   const h = (s) => (s==null?"":String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"));
@@ -284,6 +760,7 @@
       ["donghua", "#/browse/donghua", "Donghua", I.donghua, false],
       ["manga", "#/browse/manga", "Comics", I.manga, false],
       ["novel", "#/browse/novel", "Novel", I.novel, false],
+      ["library", "#/library", "Library", I.book, false],
     ];
     if (adultOn()) {
       items.push(["cosplay", "#/browse/cosplay", "Cosplay", I.cosplay, true]);
@@ -316,6 +793,8 @@
       case "watch":  return "donghua";
       case "watchanime": return "anime";
       case "read":   return parts[1] === "nhentai" ? "doujin" : (parts[1] || "");
+      case "xref":   return "cosplay";                // cosplay cross-reference -> Cosplay nav
+      case "library": return "library";
       case "docs":   return "docs";
       case "explorer": return "explorer";
       default: return seg;                            // search etc -> nothing highlighted
@@ -455,7 +934,9 @@
         <div class="spacer"></div>
         <form class="searchbox" id="searchform">
           ${I.search}
-          <input id="searchinput" type="search" placeholder="Search titles..." autocomplete="off">
+          <input id="searchinput" type="search" placeholder="Search titles..." autocomplete="off"
+                 role="combobox" aria-autocomplete="list" aria-controls="searchSuggest" aria-expanded="false">
+          <div id="searchSuggest" role="listbox" aria-label="Recent searches" hidden></div>
         </form>
         <button class="icon-btn ${adultOn()?"on":""}" id="adultBtn" title="18+ Content">18+</button>
         <button class="icon-btn" id="themeBtn" title="Toggle theme">${themeIco}</button>
@@ -463,10 +944,127 @@
       <main id="view"></main>
       <footer>${footerHtml()}</footer>`;
 
-    // search
+    // search + suggestions dropdown (Req 2.1–2.8)
     const form = document.getElementById("searchform");
     const input = document.getElementById("searchinput");
-    form.addEventListener("submit", (e)=>{ e.preventDefault(); const q=input.value.trim(); if(q) go(`#/search/${encodeURIComponent(q)}`); });
+    const suggest = document.getElementById("searchSuggest");
+    let suggRows = [];   // SearchEntry[] backing the currently rendered rows
+    let suggSel = -1;    // index of the aria-selected row, -1 = none highlighted
+    let suggBlurT = null;
+
+    const suggOpen = () => suggest && !suggest.hidden;
+
+    function closeSuggest(){
+      if(!suggest) return;
+      suggest.hidden = true;
+      suggest.innerHTML = "";
+      suggRows = [];
+      suggSel = -1;
+      input.setAttribute("aria-expanded","false");
+      input.removeAttribute("aria-activedescendant");
+    }
+
+    // Render the dropdown from a list of SearchEntry objects. Empty list hides
+    // the dropdown entirely (Req 2.8). All query text is escaped via h(...).
+    function renderSuggest(entries){
+      if(!suggest) return;
+      suggRows = Array.isArray(entries) ? entries : [];
+      if(!suggRows.length){ closeSuggest(); return; }
+      suggSel = -1;
+      const rows = suggRows.map((e,i)=>
+        `<div class="sugg-row" role="option" id="sugg-${i}" data-idx="${i}" aria-selected="false">`
+        + `<span class="sugg-ico">${I.search}</span>`
+        + `<span class="sugg-q">${h(e.query)}</span>`
+        + `<button class="sugg-x" type="button" data-x="${i}" title="Remove" aria-label="Remove ${h(e.query)}">${I.close}</button>`
+        + `</div>`).join("");
+      suggest.innerHTML = rows + `<div class="sugg-foot"><button class="sugg-clear" type="button">Clear all</button></div>`;
+      suggest.hidden = false;
+      input.setAttribute("aria-expanded","true");
+      input.removeAttribute("aria-activedescendant");
+    }
+
+    // focus -> most-recent-first history (Req 2.3); input -> filtered (Req 2.4).
+    const showRecent = () => renderSuggest(pstore.listSearches());
+    function refreshSuggest(){
+      const v = input.value;
+      renderSuggest(v.trim() === "" ? pstore.listSearches() : pstore.filterSearches(v));
+    }
+
+    // Move the aria-selected highlight, wrapping at both ends.
+    function highlight(idx){
+      const rows = suggest.querySelectorAll(".sugg-row");
+      if(!rows.length){ suggSel = -1; return; }
+      if(idx < 0) idx = rows.length - 1;
+      else if(idx >= rows.length) idx = 0;
+      suggSel = idx;
+      rows.forEach((r,i)=>{
+        const on = i === idx;
+        r.setAttribute("aria-selected", on ? "true" : "false");
+        if(on){ input.setAttribute("aria-activedescendant", r.id); r.scrollIntoView({block:"nearest"}); }
+      });
+    }
+
+    // Record the query BEFORE navigating to the search route (Req 2.1, 2.5).
+    function runSearch(q){
+      const query = (q==null?"":String(q)).trim();
+      if(!query) return;
+      pstore.recordSearch(query);
+      closeSuggest();
+      go(`#/search/${encodeURIComponent(query)}`);
+    }
+
+    form.addEventListener("submit", (e)=>{
+      e.preventDefault();
+      // Enter on a highlighted suggestion selects it; otherwise submit typed text.
+      if(suggOpen() && suggSel >= 0 && suggRows[suggSel]){ runSearch(suggRows[suggSel].query); return; }
+      runSearch(input.value);
+    });
+
+    input.addEventListener("focus", ()=>{
+      if(suggBlurT){ clearTimeout(suggBlurT); suggBlurT = null; }
+      showRecent();
+    });
+    input.addEventListener("input", refreshSuggest);
+
+    input.addEventListener("keydown", (e)=>{
+      if(e.key === "ArrowDown"){
+        if(!suggOpen()){ showRecent(); if(suggOpen()) highlight(0); }
+        else highlight(suggSel + 1);
+        e.preventDefault();
+      } else if(e.key === "ArrowUp"){
+        if(suggOpen()){ highlight(suggSel - 1); e.preventDefault(); }
+      } else if(e.key === "Escape"){
+        if(suggOpen()){ closeSuggest(); e.preventDefault(); }
+      }
+    });
+
+    // Keep input focus on dropdown interaction so the blur timeout never fires
+    // before a click is processed.
+    suggest.addEventListener("mousedown", (e)=>{ e.preventDefault(); });
+    // Delegated: per-row remove (×), footer clear-all, or pick a row (Req 2.5–2.7).
+    suggest.addEventListener("click", (e)=>{
+      const x = e.target.closest(".sugg-x");
+      if(x){
+        const entry = suggRows[+x.getAttribute("data-x")];
+        if(entry) pstore.removeSearch(entry.query);
+        refreshSuggest();
+        return;
+      }
+      if(e.target.closest(".sugg-clear")){
+        pstore.clearSearches();
+        closeSuggest();
+        return;
+      }
+      const row = e.target.closest(".sugg-row");
+      if(row){
+        const entry = suggRows[+row.getAttribute("data-idx")];
+        if(entry) runSearch(entry.query);
+      }
+    });
+
+    // Dismiss on blur (timeout so row clicks register) and on outside click.
+    input.addEventListener("blur", ()=>{ suggBlurT = setTimeout(closeSuggest, 150); });
+    document.addEventListener("click", (e)=>{ if(!e.target.closest(".searchbox")) closeSuggest(); });
 
     // theme — switch live (no re-render, so it never flickers)
     const themeBtn = document.getElementById("themeBtn");
@@ -545,14 +1143,88 @@
   }
 
   // ---- Cards --------------------------------------------------------------
+
+  // Local port of the server's `split_cosplay_title` (src/web/search.rs). Used
+  // only as a fallback when the cosplay search DTO did not carry a confident
+  // `character`/`cosplayer` split. Pure, total, and panic-free: returns either
+  // both names or neither, never exactly one side (Req 1.1, 1.9).
+  function cleanCosplayTitle(raw){
+    let t = (raw==null?"":String(raw)).trim();
+    // strip " - Cosplaytele" / " – Cosplaytele" (en-dash) site suffix
+    t = t.replace(/\s[-\u2013]\sCosplaytele$/i, "");
+    // strip "<N> photos/images/pics/videos/clips/..." count clauses
+    t = t.replace(/\s*\d+\s*(?:photos?|images?|pics?|pictures?|videos?|clips?|movies?)/gi, "");
+    // drop dangling connectors left behind (e.g. "Foo Bar and")
+    t = t.replace(/[\s,&+]+(?:and)?[\s,&+]*$/i, "");
+    return t.split(/\s+/).filter(Boolean).join(" ");
+  }
+  function splitCosplayTitle(title, snippet){
+    const cleaned = cleanCosplayTitle(title);
+    const tokens = cleaned.split(/\s+/).filter(Boolean);
+    const none = { character: null, cosplayer: null };
+    if(tokens.length < 2) return none;
+
+    // (2) explicit " by " separator (case-insensitive) — strongest signal.
+    const byIdx = tokens.findIndex(t=>t.toLowerCase()==="by");
+    if(byIdx >= 1 && byIdx + 1 < tokens.length){
+      const character = tokens.slice(0, byIdx).join(" ");
+      const cosplayer = tokens.slice(byIdx + 1).join(" ");
+      if(character && cosplayer) return { character, cosplayer };
+    }
+
+    // (3) snippet/category prefix hint — longest title prefix the snippet
+    // starts with becomes the character, the remainder the cosplayer.
+    const snip = (snippet==null?"":String(snippet)).trim().toLowerCase();
+    if(snip){
+      for(let k = tokens.length - 1; k >= 1; k--){
+        const prefix = tokens.slice(0, k).join(" ");
+        if(snip.startsWith(prefix.toLowerCase())){
+          const cosplayer = tokens.slice(k).join(" ");
+          if(cosplayer) return { character: prefix, cosplayer };
+        }
+      }
+    }
+
+    // (4) exactly-two-token fallback: cosplaytele convention is character first.
+    if(tokens.length === 2) return { character: tokens[0], cosplayer: tokens[1] };
+
+    // (5) cannot confidently split -> plain title (Req 1.9).
+    return none;
+  }
+
+  // Resolve the cosplay (character, cosplayer) split for a search card: prefer
+  // the DTO fields the server already computed, else fall back to the local
+  // heuristic over the title (+ snippet). Returns null when no confident split
+  // is available, so the caller renders the plain title (Req 1.9).
+  function cosplaySplit(item){
+    if(!item || item.kind !== "cosplay") return null;
+    let character = item.character, cosplayer = item.cosplayer;
+    if(!(character && cosplayer)){
+      const s = splitCosplayTitle(item.title, item.snippet);
+      character = s.character; cosplayer = s.cosplayer;
+    }
+    return (character && cosplayer) ? { character, cosplayer } : null;
+  }
+
   function cardHtml(item){
     const prov = Object.values(PROVIDERS).find(p=>p.kind===item.kind) || {};
     const tags = (item.tags||[]).slice(0,2).map(t=>`<span>${h(t)}</span>`).join("");
     const detailHref = `#/detail/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}`;
+    // Cosplay cards with a confident split render the title slot as two tappable
+    // cross-reference pills (character + cosplayer) instead of plain text
+    // (Req 1.1–1.3). The pills are real anchors carrying `data-stop` so the
+    // delegated [data-go] card handler does not also fire on them.
+    const split = cosplaySplit(item);
+    const titleHtml = split
+      ? `<div class="t pills">`+
+          `<a class="pill link" data-stop href="#/xref/character/${encodeURIComponent(split.character)}">${h(split.character)}</a>`+
+          `<a class="pill link" data-stop href="#/xref/cosplayer/${encodeURIComponent(split.cosplayer)}">${h(split.cosplayer)}</a>`+
+        `</div>`
+      : `<div class="t">${h(item.title)}</div>`;
     return `
       <div class="card" data-go="${detailHref}" data-prefetch-kind="${h(item.kind)}" data-prefetch-id="${h(item.id)}">
         <div class="poster">${imgTag(item.thumbnail,"",item.title)}<span class="badge src">${h(prov.label||item.source)}</span></div>
-        <div class="meta"><div class="t">${h(item.title)}</div><div class="sub">${tags}</div></div>
+        <div class="meta">${titleHtml}<div class="sub">${tags}</div></div>
       </div>`;
   }
   const grid = (items) => (!items||!items.length) ? `<div class="empty">No results found.</div>` : `<div class="grid">${items.map(cardHtml).join("")}</div>`;
@@ -639,7 +1311,31 @@
     });
   }
 
-  document.addEventListener("click", (e)=>{ const el=e.target.closest("[data-go]"); if(el){ e.preventDefault(); go(el.dataset.go); } });
+  document.addEventListener("click", (e)=>{
+    // Cross-reference pills (and any [data-stop] anchor) navigate via their own
+    // href; let the browser handle the hash change and don't trigger the card's
+    // data-go navigation underneath them.
+    if(e.target.closest("[data-stop]")) return;
+    const el=e.target.closest("[data-go]"); if(el){ e.preventDefault(); go(el.dataset.go); }
+  });
+
+  // Delegated favorite toggle (Req 4.2–4.4). One listener handles every
+  // `.fav-btn` rendered into a detail hero. Toggling goes through the store and
+  // the returned membership drives an IN-PLACE flip of the button's .on class,
+  // aria-pressed, and label — no re-render, so scroll position and the rest of
+  // the page are untouched.
+  document.addEventListener("click", (e)=>{
+    const btn = e.target.closest(".fav-btn");
+    if(!btn) return;
+    e.preventDefault();
+    let meta = {};
+    try{ meta = JSON.parse(btn.getAttribute("data-fav") || "{}"); }catch(_){ meta = {}; }
+    const on = pstore.toggleFavorite(meta);
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    const lbl = btn.querySelector("span");
+    if(lbl) lbl.textContent = on ? "Saved" : "Save";
+  });
 
   // Warm the detail endpoint when the pointer hovers a card (desktop) or on
   // first touch (mobile) so opening it feels instant.
@@ -787,10 +1483,217 @@
     }catch(e){ document.getElementById("list").innerHTML=`<div class="errbox">${h(e.message)}</div>`; }
   }
 
+  // ---- Cosplay cross-reference (#/xref/{scope}/{name}) --------------------
+  // A pinned-context, cosplay-scoped lookup opened from a cosplay search card's
+  // character/cosplayer pill. scope ∈ {character, cosplayer}. Cosplay is adult-
+  // gated, so this redirects home when the 18+ toggle is off (Req 1.1–1.11).
+  async function routeXref(scope, name){
+    if(!adultOn()) return routeHome();              // cosplay is adult-gated
+    scope = scope === "cosplayer" ? "cosplayer" : "character";
+    name = (name==null?"":String(name));
+
+    // Pinned-context header — visually distinct from the search results list
+    // (Req 1.7) — plus a loading spinner while the live lookup runs (Req 1.8).
+    const scopeLabel = scope === "cosplayer" ? "Cosplayer" : "Character";
+    const heading = scope === "cosplayer"
+      ? `More by ${h(name)}`
+      : `Other cosplays of ${h(name)}`;
+    const sub = scope === "cosplayer"
+      ? "Other characters this cosplayer has done."
+      : "Who else cosplayed this character.";
+    shell(`
+      ${crumbs([{href:"#/",label:"Home"},{href:"#/browse/cosplay",label:"Cosplay"},{label:scopeLabel}])}
+      <div class="xref">
+        <div class="xref-head">
+          <div class="xref-ico">${I.cosplay}</div>
+          <div class="xref-txt">
+            <div class="xref-scope">${h(scopeLabel)}</div>
+            <h1>${heading}</h1>
+            <p class="xref-sub">${sub}</p>
+          </div>
+        </div>
+        <div id="xrefResults">${spinner}</div>
+      </div>
+    `);
+
+    // Live cosplay-scoped lookup. Results link to #/detail/cosplay/{id} via the
+    // shared cardHtml/grid (Req 1.6). Empty -> empty-state (Req 1.10); failure
+    // -> error message + retry control (Req 1.11).
+    const results = document.getElementById("xrefResults");
+    try{
+      const data = await apiCached(`/search?${qs({q:name, source:"cosplay", page:1})}`);
+      const items = (data.items||[]).filter(it=>it.kind==="cosplay");
+      if(!results) return;
+      if(!items.length){
+        results.innerHTML = `<div class="empty xref-empty">No other cosplay posts found for &ldquo;${h(name)}&rdquo;.</div>`;
+        return;
+      }
+      results.innerHTML = grid(items);
+    }catch(e){
+      if(!results) return;
+      results.innerHTML =
+        `<div class="errbox xref-err">`+
+          `<p>Couldn&rsquo;t load cross-reference results: ${h(e.message||"request failed")}</p>`+
+          `<button type="button" class="btn" id="xrefRetry">Retry</button>`+
+        `</div>`;
+      const retry = document.getElementById("xrefRetry");
+      if(retry) retry.addEventListener("click", ()=>routeXref(scope, name));
+    }
+  }
+
+  // ===========================================================================
+  // Unified Library page (#/library)
+  // ===========================================================================
+  // Per-kind group order + display labels for the Library sections. "comics" is
+  // the display label for the "manga" provider kind (Req 5.3, 5.4).
+  const LIB_GROUPS = [
+    ["anime",   "Anime"],
+    ["donghua", "Donghua"],
+    ["manga",   "Comics"],
+    ["novel",   "Novel"],
+    ["cosplay", "Cosplay"],
+    ["doujin",  "Doujin"],
+  ];
+
+  // Build a single metadata-only Library card from a stored RichMetadata entry.
+  // Unlike cardHtml (which expects a live search item with `id`), this renders
+  // purely from what the store persisted: title, thumbnail, kind, opaqueId
+  // (Req 5.7). Navigation uses the canonical per-kind route via entryRoute
+  // (Req 5.5). A `.lib-rm` remove control is overlaid, carrying `data-stop` so
+  // the card's own [data-go] navigation does not fire when it is tapped.
+  function libCardHtml(entry, tab){
+    const kind = entry && entry.kind;
+    const prov = Object.values(PROVIDERS).find(p=>p.kind===kind) || {};
+    const id = entry && entry.opaqueId;
+    const route = pstore.entryRoute(kind, id);
+    return `
+      <div class="card" data-go="${escAttr(route)}" data-prefetch-kind="${h(kind)}" data-prefetch-id="${escAttr(id)}">
+        <button type="button" class="lib-rm" data-stop data-lib-rm="${escAttr(id)}" data-lib-tab="${h(tab)}" aria-label="Remove">${I.close}</button>
+        <div class="poster">${imgTag(entry&&entry.thumbnail,"",entry&&entry.title)}<span class="badge src">${h(prov.label||kind)}</span></div>
+        <div class="meta"><div class="t">${h(entry&&entry.title)}</div></div>
+      </div>`;
+  }
+
+  // Partition the visible entries by kind into the fixed group order and render
+  // each non-empty group as a .lib-group (title + count + grid of cards). When
+  // there are no visible entries at all, render the per-tab empty state
+  // (Req 5.3, 5.4, 5.6, 5.7).
+  function renderLibraryGroups(visibleEntries, tab){
+    const body = document.getElementById("libBody");
+    if(!body) return;
+    const entries = Array.isArray(visibleEntries) ? visibleEntries : [];
+    if(!entries.length){
+      body.innerHTML = libEmptyHtml(tab);
+      return;
+    }
+    const sections = [];
+    for(const [kind, label] of LIB_GROUPS){
+      const inGroup = entries.filter(e=>e && e.kind===kind);
+      if(!inGroup.length) continue;
+      sections.push(
+        `<section class="lib-group">`+
+          `<div class="lib-group-head"><h2><span class="dot"></span>${h(label)}</h2>`+
+            `<span class="cnt-badge">${inGroup.length}</span></div>`+
+          `<div class="grid">${inGroup.map(e=>libCardHtml(e, tab)).join("")}</div>`+
+        `</section>`
+      );
+    }
+    body.innerHTML = sections.join("");
+  }
+
+  function libEmptyHtml(tab){
+    const isFav = tab === "favorites";
+    const title = isFav ? "No favorites yet" : "No history yet";
+    const msg = isFav
+      ? "Tap Save on any title to keep it here."
+      : "Content you open will show up here automatically.";
+    return `<div class="lib-empty">`+
+      `<div class="lib-empty-ico">${isFav ? I.heart : I.book}</div>`+
+      `<h3>${title}</h3><p>${msg}</p></div>`;
+  }
+
+  // Library page (Req 5.1–5.7). Two tabs: Favorites (sync, from localStorage)
+  // and History (async, from IndexedDB). Adult-gated kinds (cosplay/doujin) are
+  // dropped via pstore.visible when the 18+ toggle is off (Req 3.10, 4.7).
+  async function routeLibrary(tab){
+    tab = tab === "history" ? "history" : "favorites";   // default Favorites (Req 5.2)
+
+    const tabLink = (seg, label, ico) =>
+      `<a class="lib-tab${seg===tab?" active":""}" role="tab" `+
+        `aria-selected="${seg===tab?"true":"false"}" href="#/library/${seg}">`+
+        `${ico}<span>${label}</span></a>`;
+
+    // History gets a clear-all toolbar (Req 4.6 sibling: history clear).
+    const toolbar = tab === "history"
+      ? `<div class="lib-toolbar"><button type="button" class="lib-clear" id="libClear">`+
+          `${I.close}<span>Clear all</span></button></div>`
+      : "";
+
+    shell(`
+      ${crumbs([{href:"#/",label:"Home"},{label:"Library"}])}
+      <div class="library" id="library">
+        <div class="lib-tabs" role="tablist">
+          ${tabLink("favorites", "Favorites", I.heart)}
+          ${tabLink("history", "History", I.book)}
+        </div>
+        ${toolbar}
+        <div id="libBody">${spinner}</div>
+      </div>
+    `);
+
+    // Wire the History clear-all control (Req 4.6 history-clear).
+    const clearBtn = document.getElementById("libClear");
+    if(clearBtn){
+      clearBtn.addEventListener("click", async ()=>{
+        await pstore.clearHistory();
+        routeLibrary("history");
+      });
+    }
+
+    // Load the active tab's entries, drop adult-gated kinds when the toggle is
+    // off, then group + render (Req 3.10, 4.7, 5.3, 5.4).
+    const entries = tab === "favorites"
+      ? pstore.listFavorites()                 // sync (localStorage)
+      : await pstore.listHistory();            // async (IndexedDB)
+    if(activeNavSeg() !== "library") return;   // user navigated away while awaiting
+    renderLibraryGroups(pstore.visible(entries), tab);
+  }
+
+  // Delegated per-entry remove control for Library cards (Req 4.6 favorites /
+  // history). `data-stop` already prevents the card's [data-go] navigation from
+  // firing; here we remove from the right collection and re-render the tab.
+  document.addEventListener("click", (e)=>{
+    const rm = e.target.closest(".lib-rm");
+    if(!rm) return;
+    e.preventDefault();
+    const id = rm.getAttribute("data-lib-rm");
+    const tab = rm.getAttribute("data-lib-tab");
+    if(tab === "history"){
+      Promise.resolve(pstore.removeHistory(id)).then(()=>routeLibrary("history"));
+    } else {
+      pstore.removeFavorite(id);
+      routeLibrary("favorites");
+    }
+  });
+
+
   // ===========================================================================
   // Detail / watch / read
   // ===========================================================================
   const setD = (html) => { const el=document.getElementById("d"); if(el) el.innerHTML=html; };
+
+  // Favorite control (Req 4.1–4.5). Reads current membership from the store at
+  // render time so the on/off state always reflects reality. The full
+  // RichMetadata needed to toggle is carried on a `data-fav` attribute as
+  // HTML-attribute-escaped JSON (escAttr neutralises quotes/angle-brackets, so
+  // it is XSS-safe); the delegated handler below parses it back. The .on class
+  // AND aria-pressed are both set so the CSS on-state holds either way.
+  function favButton(meta){
+    const on = pstore.isFavorite(meta && meta.opaqueId);
+    return `<button type="button" class="btn fav-btn${on?" on":""}" `+
+      `data-fav="${escAttr(JSON.stringify(meta||{}))}" aria-pressed="${on?"true":"false"}">`+
+      `${I.heart}<span>${on?"Saved":"Save"}</span></button>`;
+  }
 
   function heroHtml(kind, label, data, facts, actions, syn, cover){
     return `
@@ -804,6 +1707,156 @@
           <div class="actions">${actions}</div>
         </div>
       </div>`;
+  }
+
+  // ===========================================================================
+  // Stale-ID self-healing (Req 7.2–7.6)
+  // ===========================================================================
+  // Saved favorites/history keep their opaque id alongside RichMetadata. When
+  // the server secret rotates (APIKU_SECRET unset across a restart) a saved id
+  // becomes a StaleId: the detail endpoint rejects it with the `invalid_id`
+  // envelope. We detect exactly that error, re-resolve the entry by searching
+  // its stored title, rewrite the saved id on a hit, and otherwise show an
+  // unavailable state that keeps the stored metadata visible. Only saved-entry
+  // navigation triggers this path; ordinary browsing is unchanged.
+
+  // isStaleId(e): true only for the API `invalid_id` envelope (signature
+  // mismatch / decode failure). `api()` throws Error("<code>: <message>"), so
+  // we extract the code token (everything before the first ":") and match it
+  // exactly. Network/upstream/not-found/other errors do NOT match, so they
+  // never trigger re-resolution (Req 7.3 — gating).
+  function isStaleId(e){
+    if(!e) return false;
+    const msg = (e.message != null ? String(e.message) : String(e)).trim();
+    const code = msg.split(":", 1)[0].trim();
+    return code === "invalid_id";
+  }
+
+  // detailPath(kind, id): the same endpoint routeDetail/renderers use for each
+  // kind. Returns null for an unknown kind.
+  function detailPath(kind, id){
+    const ep = DETAIL_EP[kind];
+    if(!ep) return null;
+    if(kind==="anime")   return `/anime/${encodeURIComponent(id)}`;
+    if(kind==="cosplay") return `/cosplay/${encodeURIComponent(id)}`;
+    if(kind==="doujin")  return `/nhentai/${encodeURIComponent(id)}`;
+    const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
+    return `/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`;
+  }
+
+  // fetchDetail(kind, id): resolve a detail document via the cached fetch path
+  // (same call the renderers make). Throws on any API error, including the
+  // `invalid_id` stale-id error that isStaleId classifies.
+  async function fetchDetail(kind, id){
+    const path = detailPath(kind, id);
+    if(!path) throw new Error(`invalid_kind: ${kind}`);
+    return apiCached(path);
+  }
+
+  // searchTitle(kind, title): re-resolve a stale entry by searching the
+  // provider for its stored title. Scopes the search to the kind's provider
+  // (PROVIDERS[kind].api, e.g. anime→otakudesu) and picks the best match:
+  // an exact normalized-title match of the same kind if present, else the first
+  // same-kind item. Returns null when the title is blank or nothing matches.
+  async function searchTitle(kind, title){
+    const t = (title==null ? "" : String(title)).trim();
+    if(!t) return null;
+    const prov = PROVIDERS[kind];
+    const source = prov ? prov.api : kind;
+    let data;
+    try { data = await apiCached(`/search?${qs({q:t, source, page:1})}`); }
+    catch(_){ return null; }
+    const items = (data && data.items) || [];
+    if(!items.length) return null;
+    const norm = (s)=> (s==null ? "" : String(s)).trim().toLowerCase();
+    const want = norm(t);
+    const sameKind = items.filter(it=> it && it.kind === kind);
+    const pool = sameKind.length ? sameKind : items;
+    const exact = pool.find(it=> it && norm(it.title) === want);
+    const hit = exact || pool[0];
+    return (hit && hit.id) ? hit : null;
+  }
+
+  // renderUnavailable(kind, meta): no re-resolution match — keep the stored
+  // RichMetadata (title/thumbnail) visible but flag the item as unavailable
+  // rather than showing a bare error (Req 7.5). Reuses the existing
+  // .card.unavailable / .badge.unavail / .lib-unavail-note styles.
+  function renderUnavailable(kind, meta){
+    const m = meta || {};
+    const prov = Object.values(PROVIDERS).find(p=>p.kind===kind) || {};
+    setD(
+      crumbs([{href:"#/",label:"Home"},{href:"#/library",label:"Library"},{label:m.title||"Unavailable"}])+
+      `<div class="lib-group"><div class="grid">`+
+        `<div class="card unavailable">`+
+          `<div class="poster">${imgTag(m.thumbnail,"",m.title)}<span class="badge unavail">Unavailable</span></div>`+
+          `<div class="meta"><div class="t">${h(m.title||"Untitled")}</div>`+
+            `<div class="lib-unavail-note">No longer available</div></div>`+
+        `</div>`+
+      `</div></div>`+
+      `<div class="actions" style="margin-top:14px"><a class="btn" href="#/library">${I.arrow} Back to Library</a></div>`
+    );
+  }
+
+  // paintMetaHero(kind, meta): instant first paint from stored metadata so a
+  // saved entry never shows a blank flash while resolution runs (Req 7.6). A
+  // spinner sits in the actions row until the resolved detail replaces it.
+  function paintMetaHero(kind, meta){
+    const m = meta || {};
+    const prov = Object.values(PROVIDERS).find(p=>p.kind===kind) || {};
+    const facts =
+      `<span class="pill">${h(prov.label||kind)}</span>`+
+      (m.cosplayer?`<span class="pill">${h(m.cosplayer)}</span>`:"")+
+      (m.character?`<span class="pill">${h(m.character)}</span>`:"");
+    setD(heroHtml(kind, prov.label||kind, { title: m.title }, facts, spinner, null, m.thumbnail));
+  }
+
+  // renderResolved(kind, id, data): hand a successfully-resolved detail to the
+  // matching renderer. cosplay/doujin renderers fetch by id (cache-hit on the
+  // already-warmed path); the rest take the resolved data directly.
+  function renderResolved(kind, id, data){
+    if(kind==="cosplay") return renderCosplay(id);
+    if(kind==="doujin")  return renderDoujin(id);
+    if(kind==="anime")   return renderAnimeSeries(id, data);
+    if(kind==="donghua") return renderDonghuaSeries(id, data);
+    return renderReadableSeries(kind, id, data, 1);
+  }
+
+  // resolveSaved(kind, id, meta): the self-heal wrapper. Happy path returns the
+  // resolved { id, data } (Req 7.2). On a stale-id error ONLY (Req 7.3) it
+  // re-resolves via the stored title; a hit rewrites the saved id in both
+  // favorites (sync) and history (async), updates the route hash so a reload
+  // uses the fresh id, and refetches (Req 7.4). No match renders the unavailable
+  // state and returns null (Req 7.5). Any non-stale error propagates unchanged.
+  async function resolveSaved(kind, id, meta){
+    try {
+      const data = await fetchDetail(kind, id);
+      return { id, data };
+    } catch(e){
+      if(!isStaleId(e)) throw e;                       // only heal stale ids (Req 7.3)
+      const hit = await searchTitle(kind, meta && meta.title);
+      if(hit && hit.id){
+        pstore.updateFavoriteId(id, hit.id);           // sync rewrite (Req 7.4)
+        await pstore.updateHistoryId(id, hit.id);       // async rewrite (Req 7.4)
+        try { history.replaceState(null, "", pstore.entryRoute(kind, hit.id)); } catch(_){}
+        const data = await fetchDetail(kind, hit.id);
+        return { id: hit.id, data };
+      }
+      renderUnavailable(kind, meta);                    // keep metadata (Req 7.5)
+      return null;
+    }
+  }
+
+  // savedMetaFor(id): look up stored RichMetadata for an opaque id across
+  // favorites (sync) then browsing history (async). Returns null for a
+  // non-saved id, so ordinary navigation never enters the self-heal path.
+  async function savedMetaFor(id){
+    if(id == null) return null;
+    const fav = pstore.listFavorites().find(e=> e && e.opaqueId === id);
+    if(fav) return fav;
+    try {
+      const hist = await pstore.listHistory();
+      return hist.find(e=> e && e.opaqueId === id) || null;
+    } catch(_){ return null; }
   }
 
   async function routeDetail(kind, id){
@@ -828,6 +1881,22 @@
     }
 
     shell(`<div id="d">${spinner}</div>`);
+
+    // Saved-entry path (Req 7.2–7.6): if this id is a stored favorite/history
+    // entry, paint instantly from its RichMetadata (no blank flash) and resolve
+    // through the self-heal wrapper so a stale saved id re-resolves by title
+    // transparently. Non-saved ids skip this entirely, so ordinary navigation
+    // is unchanged.
+    const savedMeta = await savedMetaFor(id);
+    if(savedMeta){
+      paintMetaHero(kind, savedMeta);                 // first paint from metadata (Req 7.6)
+      try{
+        const res = await resolveSaved(kind, id, savedMeta);
+        if(res) return renderResolved(kind, res.id, res.data);
+        return;                                        // unavailable already rendered (Req 7.5)
+      }catch(e){ return setD(`<div class="errbox">${h(e.message)}</div>`); }
+    }
+
     try{
       if(kind==="cosplay") return renderCosplay(id);
       if(kind==="doujin") return renderDoujin(id);
@@ -859,6 +1928,11 @@
       ...(data.batch||[]).slice(0,1).map(b=>`<a class="btn sm" href="#/watchanime/${encodeURIComponent(b.id)}">${I.book} Batch</a>`),
     ].join("");
     const syn = data.synopsis || (data.japanese_title?`Japanese title: ${data.japanese_title}`:"");
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind: "anime", timestamp: Date.now() };
+    // Record this open into browsing history (fire-and-forget; never blocks or
+    // throws into the render path). Reuses the same RichMetadata shape as the
+    // favorite control (Req 3.4, 3.7, 3.8).
+    void pstore.recordHistory(favMeta);
     const epControls = eps.length>24
       ? `<div class="ep-tools"><input id="epSearch" type="search" inputmode="numeric" placeholder="Jump to episode..." autocomplete="off"></div>`
       : "";
@@ -867,7 +1941,7 @@
       : `<div class="empty">No episodes available.</div>`;
 
     setD(
-      heroHtml("anime","Anime",data,facts,actions,syn,data.cover)+
+      heroHtml("anime","Anime",data,facts,actions+favButton(favMeta),syn,data.cover)+
       `<div class="row-head"><h2><span class="dot"></span>Episode <span class="cnt-badge">${eps.length}</span></h2></div>${epControls}${epGrid}`
     );
     const epSearch = document.getElementById("epSearch");
@@ -928,8 +2002,12 @@
 
     const epBtn = (e)=>`<button class="ep-btn center" data-ep="${e.number}" data-go="#/watch/${encodeURIComponent(e.id)}">Ep ${e.number}</button>`;
 
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind: "donghua", timestamp: Date.now() };
+    // Browsing-history record (fire-and-forget; Req 3.3, 3.7, 3.8).
+    void pstore.recordHistory(favMeta);
+
     setD(
-      heroHtml("donghua","Donghua",data,facts,actions,data.synopsis,data.cover)+
+      heroHtml("donghua","Donghua",data,facts,actions+favButton(favMeta),data.synopsis,data.cover)+
       `<div class="row-head"><h2><span class="dot"></span>Episode <span class="cnt-badge">${eps.length}</span></h2></div>${epControls}
        <div class="ep-pager-top"></div>
        <div class="ep-list" id="epList">${eps.length?"":`<div class="empty">No episodes available.</div>`}</div>
@@ -1025,6 +2103,11 @@
       : null;
     const actions = firstReadId?`<a class="btn primary" href="#/${readPath}/${encodeURIComponent(firstReadId)}">${I.book} Start Reading</a>`:"";
     const syn = data.description || data.synopsis;
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind, timestamp: Date.now() };
+    // Browsing-history record for comics/novel detail (fire-and-forget). Upsert
+    // by opaqueId means re-renders on pager nav just refresh the timestamp
+    // rather than duplicating (Req 3.1, 3.2, 3.7, 3.8).
+    void pstore.recordHistory(favMeta);
 
     const langTabs = (kind==="manga" && languages.length>1)
       ? `<div class="lang-tabs" id="langTabs">
@@ -1080,7 +2163,7 @@
     );
 
     setD(
-      heroHtml(kind,label,data,facts,actions,syn,data.cover)+
+      heroHtml(kind,label,data,facts,actions+favButton(favMeta),syn,data.cover)+
       `<div class="row-head"><h2><span class="dot"></span>Chapter List</h2></div>${langTabs}
        <div class="ch-pager-top">${pager}</div>
        <div class="ep-list wide" id="chList">${chs.length?chapterRowsFor(langState.active):`<div class="empty">No chapters yet.</div>`}</div>
@@ -1130,6 +2213,9 @@
     ].join("");
     const dls = (data.downloads||[]).map(d=>`<a class="btn sm" target="_blank" rel="noopener" href="${h(d.url)}">${h(d.name)}</a>`).join("");
     const actions = dls + (data.unzip_password?`<span class="pill">&#128273; ${h(data.unzip_password)}</span>`:"");
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind: "cosplay", cosplayer: data.cosplayer, character: data.character, timestamp: Date.now() };
+    // Browsing-history record; cosplay carries cosplayer/character (Req 3.5, 3.7).
+    void pstore.recordHistory(favMeta);
 
     // Video player(s) FIRST, before the photo flow.
     const vids = (data.videos||[]);
@@ -1159,7 +2245,7 @@
     const imgs = (data.images||[]).map(u=>`<a href="${h(u)}" target="_blank" rel="noopener">${imgNatural(u,"")}</a>`).join("");
 
     setD(
-      heroHtml("cosplay","Cosplay",data,facts,actions,null,data.cover)+
+      heroHtml("cosplay","Cosplay",data,facts,actions+favButton(favMeta),null,data.cover)+
       videoBlock+
       `<div class="row-head"><h2><span class="dot"></span>${(data.images||[]).length} Photos</h2></div>`+
       `<div class="gallery">${imgs||`<div class="empty">No photos.</div>`}</div>`
@@ -1182,8 +2268,11 @@
     ].join("");
     const first = (data.chapters||[])[0];
     const actions = first?`<a class="btn primary" href="#/read/nhentai/${encodeURIComponent(first.id)}">${I.book} Read</a>`:"";
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind: "doujin", timestamp: Date.now() };
+    // Browsing-history record for doujin detail (fire-and-forget; Req 3.6, 3.7).
+    void pstore.recordHistory(favMeta);
     setD(
-      heroHtml("doujin","Doujin",data,facts,actions,null,data.cover)+
+      heroHtml("doujin","Doujin",data,facts,actions+favButton(favMeta),null,data.cover)+
       `<div class="row-head"><h2><span class="dot"></span>Page Preview</h2></div>
        <div id="preview" class="thumb-grid">${skelGrid(8)}</div>`
     );
@@ -1211,6 +2300,10 @@
     shell(`<div id="d">${warmed?"":spinner}</div>`);
     try{
       const e = await apiCached(`/donghua/episode/${encodeURIComponent(id)}`);
+      // Browsing-history record. Point at the SERIES detail (series_id) so the
+      // Library entry opens the series page, falling back to the episode id
+      // when the series is unknown. Renders from metadata alone (Req 3.3, 3.8).
+      void pstore.recordHistory({ opaqueId: e.series_id||id, title: e.series_title, kind: "donghua", timestamp: Date.now() });
       const servers = e.servers||[];
       const seriesLink = e.series_id?`#/detail/donghua/${encodeURIComponent(e.series_id)}`:"#/";
       const player = servers.length?`<div class="player-wrap"><div class="frame"><iframe id="player" src="${h(servers[0].embed_url)}" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture"></iframe></div></div>`:`<div class="empty">No video servers available.</div>`;
@@ -1240,6 +2333,8 @@
     shell(`<div id="d">${warmed?"":spinner}</div>`);
     try{
       const e = await apiCached(`/anime/episode/${encodeURIComponent(id)}`);
+      // Browsing-history record pointing at the series detail (Req 3.4, 3.8).
+      void pstore.recordHistory({ opaqueId: e.series_id||id, title: e.series_title, kind: "anime", timestamp: Date.now() });
       const mirrors = e.mirrors||[];
       const seriesLink = e.series_id?`#/detail/anime/${encodeURIComponent(e.series_id)}`:"#/";
       const epLabel = e.episode_number!=null ? `Episode ${e.episode_number}` : "Episode";
@@ -1321,6 +2416,11 @@
 
     try{
       const c = await apiCached(`/${ep}/${encodeURIComponent(id)}`);
+      // Browsing-history record. Point at the series detail (series_id) so the
+      // Library entry opens the series page, falling back to the chapter id.
+      // Map the reader kind onto the detail kind (nhentai -> doujin) so the
+      // recorded entry's kind matches its detail route (Req 3.1, 3.6, 3.8).
+      void pstore.recordHistory({ opaqueId: c.series_id||id, title: c.series_title, kind: kind==="nhentai"?"doujin":"manga", timestamp: Date.now() });
       // If no reading context, fall back to generic next_id (nhentai/single-lang)
       if(!currentNextId) currentNextId = c.next_id || null;
       const pages = c.pages||[];
@@ -1416,6 +2516,8 @@
   async function renderNovelChapter(id){
     try{
     const c = await apiCached(`/novel/chapter/${encodeURIComponent(id)}`);
+    // Browsing-history record pointing at the novel series detail (Req 3.2, 3.8).
+    void pstore.recordHistory({ opaqueId: c.series_id||id, title: c.series_title, kind: "novel", timestamp: Date.now() });
     const paras = (c.body||"").split(/\n{2,}/).map(s=>s.trim()).filter(Boolean).map(p=>`<p>${h(p)}</p>`).join("");
     const nav = `<div class="reader-nav">
       ${c.prev_id?`<a class="btn sm" href="#/read/novel/${encodeURIComponent(c.prev_id)}">&larr; Previous</a>`:""}
@@ -1430,8 +2532,9 @@
 
   // route dispatch is defined in part 2 (appended)
   window.__apiku = { shell, setView, viewEl, h, qs, api, apiRaw, apiCached, prefetch, spinner, go, I,
-    LITE, setLite,
-    routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeWatchAnime, routeRead };
+    LITE, setLite, pstore,
+    isStaleId, searchTitle, resolveSaved, fetchDetail,
+    routeHome, routeBrowse, routeSearch, routeXref, routeDetail, routeWatch, routeWatchAnime, routeRead, routeLibrary };
 })();
 
 // ===========================================================================
@@ -1441,7 +2544,7 @@
   "use strict";
   const A = window.__apiku;
   const { shell, setView, h, apiRaw, I, go,
-    routeHome, routeBrowse, routeSearch, routeDetail, routeWatch, routeWatchAnime, routeRead } = A;
+    routeHome, routeBrowse, routeSearch, routeXref, routeDetail, routeWatch, routeWatchAnime, routeRead, routeLibrary } = A;
 
   // ---- API Docs -----------------------------------------------------------
   const ENDPOINTS = [
@@ -1863,6 +2966,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
       case "home":     return routeHome();
       case "browse":   return routeBrowse(parts[1], parts[2], parts[3]);
       case "search":   return routeSearch(parts[1]||"", parts[2], parts[3]);
+      case "xref":     return routeXref(parts[1], parts[2]);
+      case "library":  return routeLibrary(parts[1]);
       case "detail":   return routeDetail(parts[1], parts[2]);
       case "watch":    return routeWatch(parts[1]);
       case "watchanime": return routeWatchAnime(parts[1]);

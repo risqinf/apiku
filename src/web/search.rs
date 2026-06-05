@@ -104,6 +104,15 @@ pub struct SearchResultItem {
     /// Genre/category labels for filtering
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Cosplayer name (only set for cosplaytele results that split cleanly)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cosplayer: Option<String>,
+    /// Character name (only set for cosplaytele results that split cleanly)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
+    /// Series/franchise name (only set for cosplaytele results when known)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +167,9 @@ pub fn parse_otakudesu_search(base_url: &str, html: &str) -> Vec<SearchResultIte
                 kind: Some("anime_series".to_string()),
                 snippet: None,
                 tags,
+                cosplayer: None,
+                character: None,
+                series: None,
             }
         })
         .collect()
@@ -175,6 +187,9 @@ pub fn parse_novelid_search(base_url: &str, html: &str) -> Vec<SearchResultItem>
             kind: Some("novel_series".to_string()),
             snippet: None,
             tags: it.tags,
+            cosplayer: None,
+            character: None,
+            series: None,
         })
         .collect()
 }
@@ -388,6 +403,9 @@ pub fn parse_nhentai_search(json: &serde_json::Value) -> Vec<SearchResultItem> {
             kind: Some("manga_series".to_string()),
             snippet: None,
             tags,
+            cosplayer: None,
+            character: None,
+            series: None,
         });
     }
     items
@@ -416,6 +434,122 @@ fn build_nhentai_cover(media_id: &str, ext: &str) -> String {
         media_id,
         &format!("galleries/{}/cover.{}", media_id, ext),
     )
+}
+
+/// Result of splitting a cosplaytele search title into its components.
+///
+/// Invariant: `character` and `cosplayer` are either **both** `Some` (each a
+/// non-empty string drawn from the cleaned title/snippet) or **both** `None`.
+/// We never expose exactly one side — a half-known split is treated as unknown
+/// so the client falls back to rendering plain, non-cross-referenced text
+/// (Req 1.9). `series` is independent and only set when confidently known.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CosplaySplit {
+    pub character: Option<String>,
+    pub cosplayer: Option<String>,
+    pub series: Option<String>,
+}
+
+/// Strip trailing `N photos`/`N images`/`N videos` count clauses and the
+/// `" - Cosplaytele"` site suffix from a raw cosplaytele search title, returning
+/// a whitespace-collapsed title. Mirrors the count/suffix shapes in
+/// `adapters::cosplaytele` (`PHOTO_COUNT_RE`/`VIDEO_COUNT_RE`/`clean_title`).
+fn clean_cosplay_title(raw: &str) -> String {
+    use once_cell::sync::Lazy;
+    // "<N> photos/images/pics/videos/clips/..." anywhere in the title.
+    static COUNT_RE: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(r"(?i)\s*\d+\s*(?:photos?|images?|pics?|pictures?|videos?|clips?|movies?)")
+            .unwrap()
+    });
+    // Dangling connectors left after removing counts (e.g. "Foo Bar and").
+    static TRAILING_CONN_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"(?i)[\s,&+]+(?:and)?[\s,&+]*$").unwrap());
+
+    let trimmed = raw.trim();
+    let no_suffix = trimmed
+        .strip_suffix(" - Cosplaytele")
+        .or_else(|| trimmed.strip_suffix(" \u{2013} Cosplaytele")) // en-dash variant
+        .unwrap_or(trimmed);
+
+    let no_counts = COUNT_RE.replace_all(no_suffix, "");
+    let no_trailing = TRAILING_CONN_RE.replace(no_counts.trim(), "");
+    no_trailing.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Split a cosplaytele search title into `(character, cosplayer, series?)`.
+///
+/// Pure, total, and panic-free for any input (empty/whitespace/unicode/huge).
+/// Priority order (from the design):
+///   1. Clean the title (strip trailing photo/video counts + site suffix).
+///   2. `" by "` separator (case-insensitive) -> `character` = left, `cosplayer` = right.
+///   3. `.cat-label` snippet/category prefix match — a category label is usually
+///      the character and appears as a prefix of `"<Character> <Cosplayer>"`, so
+///      the longest title prefix the snippet starts with becomes `character` and
+///      the remainder becomes `cosplayer`.
+///   4. Exactly-two-token fallback (`"<character> <cosplayer>"`).
+///   5. Otherwise both `None`.
+///
+/// All returned substrings are drawn from the cleaned title; the character and
+/// cosplayer are always returned together or not at all (Req 1.1, 1.9).
+pub fn split_cosplay_title(title: &str, snippet: Option<&str>) -> CosplaySplit {
+    let cleaned = clean_cosplay_title(title);
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+
+    // Need at least two tokens to host both a character and a cosplayer.
+    if tokens.len() < 2 {
+        return CosplaySplit::default();
+    }
+
+    // (2) Explicit " by " separator (case-insensitive) — the strongest signal.
+    if let Some(by_idx) = tokens.iter().position(|t| t.eq_ignore_ascii_case("by")) {
+        // Require a non-empty side on each end of the separator.
+        if by_idx >= 1 && by_idx + 1 < tokens.len() {
+            let character = tokens[..by_idx].join(" ");
+            let cosplayer = tokens[by_idx + 1..].join(" ");
+            if !character.is_empty() && !cosplayer.is_empty() {
+                return CosplaySplit {
+                    character: Some(character),
+                    cosplayer: Some(cosplayer),
+                    series: None,
+                };
+            }
+        }
+    }
+
+    // (3) Category/snippet prefix hint. The `.cat-label` snippet carries category
+    // labels that on cosplaytele typically equal the character/series and appear
+    // as a prefix of the title. Take the longest title prefix the snippet starts
+    // with as `character`, leaving the remainder as `cosplayer`.
+    if let Some(snip) = snippet {
+        let snip_lower = snip.trim().to_lowercase();
+        if !snip_lower.is_empty() {
+            for k in (1..tokens.len()).rev() {
+                let prefix = tokens[..k].join(" ");
+                if snip_lower.starts_with(&prefix.to_lowercase()) {
+                    let cosplayer = tokens[k..].join(" ");
+                    if !cosplayer.is_empty() {
+                        return CosplaySplit {
+                            character: Some(prefix),
+                            cosplayer: Some(cosplayer),
+                            series: None,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // (4) Exactly-two-token fallback: cosplaytele convention is character first.
+    if tokens.len() == 2 {
+        return CosplaySplit {
+            character: Some(tokens[0].to_string()),
+            cosplayer: Some(tokens[1].to_string()),
+            series: None,
+        };
+    }
+
+    // (5) Cannot confidently split -> render plain title (Req 1.9).
+    CosplaySplit::default()
 }
 
 fn parse_cosplaytele_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
@@ -477,6 +611,10 @@ fn parse_cosplaytele_search(base_url: &str, html: &str) -> Vec<SearchResultItem>
             .next()
             .map(|n| n.text().collect::<Vec<_>>().join(" ").trim().to_string());
 
+        // Split the title into character / cosplayer (and series when known)
+        // so the client can render cross-reference pills (Req 1.1, 1.9).
+        let split = split_cosplay_title(&title, snippet.as_deref());
+
         items.push(SearchResultItem {
             source: "cosplaytele".to_string(),
             title,
@@ -485,6 +623,9 @@ fn parse_cosplaytele_search(base_url: &str, html: &str) -> Vec<SearchResultItem>
             kind: Some("cosplay_post".to_string()),
             snippet,
             tags: Vec::new(),
+            cosplayer: split.cosplayer,
+            character: split.character,
+            series: split.series,
         });
     }
     items
@@ -554,6 +695,9 @@ fn parse_anichin_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
             kind: Some("donghua_series".to_string()),
             snippet: None,
             tags,
+            cosplayer: None,
+            character: None,
+            series: None,
         });
     }
     items
@@ -627,6 +771,9 @@ fn parse_mangaku_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
             kind: Some("manga_series".to_string()),
             snippet: None,
             tags,
+            cosplayer: None,
+            character: None,
+            series: None,
         });
     }
     items
@@ -679,6 +826,9 @@ fn parse_wp_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
             kind: None,
             snippet,
             tags: Vec::new(),
+            cosplayer: None,
+            character: None,
+            series: None,
         });
     }
     items
@@ -779,6 +929,9 @@ pub fn parse_mangaball_search(json: &serde_json::Value) -> Vec<SearchResultItem>
             kind: Some("manga_series".to_string()),
             snippet,
             tags,
+            cosplayer: None,
+            character: None,
+            series: None,
         });
     }
     items

@@ -439,6 +439,15 @@ pub struct SearchItemDto {
     pub thumbnail: Option<String>,
     pub snippet: Option<String>,
     pub tags: Vec<String>,
+    /// Cosplayer name (present only for cosplay results that split cleanly)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cosplayer: Option<String>,
+    /// Character name (present only for cosplay results that split cleanly)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
+    /// Series/franchise name (present only for cosplay results when known)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1252,6 +1261,9 @@ fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
         thumbnail: proxy_opt(state, raw.thumbnail.as_deref()),
         snippet: raw.snippet,
         tags: raw.tags,
+        cosplayer: raw.cosplayer,
+        character: raw.character,
+        series: raw.series,
     }
 }
 
@@ -1376,6 +1388,9 @@ async fn browse_otakudesu(state: &ApiState, feed: &str, page: u32) -> Result<Bro
                 kind: Some("anime_series".to_string()),
                 snippet: None,
                 tags: hit.genres,
+                cosplayer: None,
+                character: None,
+                series: None,
             };
             raw_search_to_dto(state, raw)
         })

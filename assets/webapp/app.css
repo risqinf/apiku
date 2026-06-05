@@ -813,3 +813,334 @@ html[data-lite] .skeleton { background: var(--bg-card) !important; }
 html[data-lite] .spinner { animation: none !important; border-top-color: var(--brand); }
 /* Even cheaper background: a flat fill, no gradient wash to composite. */
 html[data-lite] body::before { background: var(--bg) !important; }
+
+/* ========================================================================
+   Client personalization surfaces
+   Search suggestions dropdown, favorite control, cosplay cross-reference
+   view, and the unified Library page. Uses the existing theme variables and
+   honours [data-lite] (no animation/transition/transform — see overrides at
+   the end of this block).
+   ======================================================================== */
+
+/* ---------- Search suggestions dropdown (#searchSuggest) ---------- */
+/* Anchors the dropdown to the existing search box so it floats just beneath
+   the input. The searchbox is a flex form in the sticky header. */
+.searchbox { position: relative; }
+
+#searchSuggest {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 65;
+  min-width: 240px;
+  max-height: min(60vh, 460px);
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  animation: suggIn .14s ease-out;
+}
+/* Hidden when there is nothing to suggest (Req 2.8). */
+#searchSuggest:empty,
+#searchSuggest[hidden] { display: none; }
+@keyframes suggIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+.sugg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .14s, color .14s;
+}
+.sugg-row .sugg-ico { flex: none; opacity: .55; display: inline-flex; }
+.sugg-row .sugg-ico svg { width: 16px; height: 16px; }
+.sugg-row .sugg-q {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Hover + keyboard highlight (aria-selected set during Arrow nav). */
+.sugg-row:hover,
+.sugg-row[aria-selected="true"] { background: var(--bg-elev); color: var(--brand); }
+
+/* Per-row remove control (×). */
+.sugg-x {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+  transition: background .14s, color .14s, opacity .14s;
+}
+.sugg-x svg { width: 15px; height: 15px; }
+.sugg-row:hover .sugg-x,
+.sugg-row[aria-selected="true"] .sugg-x { opacity: 1; }
+.sugg-x:hover { background: color-mix(in srgb, var(--brand-3) 18%, transparent); color: var(--brand-3); }
+/* On touch devices (no hover) keep the remove control visible. */
+@media (hover: none) { .sugg-x { opacity: .7; } }
+
+/* Footer "Clear all" control. */
+.sugg-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  padding: 7px 6px 3px;
+  border-top: 1px solid var(--border-soft);
+}
+.sugg-clear {
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 12.5px;
+  border-radius: 7px;
+  transition: color .14s, background .14s;
+}
+.sugg-clear:hover { color: var(--brand-3); background: color-mix(in srgb, var(--brand-3) 12%, transparent); }
+
+/* ---------- Favorite control (.fav-btn) ---------- */
+/* Extends .btn; off = neutral outline, on = filled-heart accent. The on-state
+   is driven by both the .on class and aria-pressed so the styling holds even
+   if only one is toggled in place. */
+.fav-btn svg { transition: transform .15s, fill .15s, color .15s; }
+.fav-btn.on,
+.fav-btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--brand-3) 16%, var(--bg-elev));
+  border-color: color-mix(in srgb, var(--brand-3) 48%, var(--border));
+  color: var(--brand-3);
+}
+.fav-btn.on svg,
+.fav-btn[aria-pressed="true"] svg { color: var(--brand-3); fill: currentColor; transform: scale(1.08); }
+.fav-btn.on:hover,
+.fav-btn[aria-pressed="true"]:hover { filter: brightness(1.05); }
+
+/* ---------- Cosplay cross-reference view (#/xref) ---------- */
+.xref { max-width: var(--maxw); }
+
+/* Pinned-context header — deliberately distinct from the search results list
+   (soft brand wash + brand-tinted border) so it reads as a scoped panel. */
+.xref-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 20px 22px;
+  margin-bottom: 20px;
+  border-radius: var(--radius);
+  background: var(--grad-soft), var(--bg-card);
+  border: 1px solid color-mix(in srgb, var(--brand) 38%, var(--border));
+  box-shadow: var(--shadow-sm);
+}
+.xref-head .xref-ico {
+  flex: none;
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: var(--grad);
+  box-shadow: var(--shadow-sm);
+}
+.xref-head .xref-ico svg { width: 24px; height: 24px; }
+.xref-head .xref-txt { min-width: 0; flex: 1; }
+.xref-head .xref-scope {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--brand);
+  margin-bottom: 3px;
+}
+.xref-head h1 {
+  margin: 0;
+  font-size: 23px;
+  letter-spacing: -0.4px;
+  line-height: 1.2;
+  word-break: break-word;
+}
+.xref-head .xref-sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+/* Pills inside the pinned header (character/cosplayer cross-links). The
+   generic a.pill.link visuals already exist; this just lays them out. */
+.xref-head .xref-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+
+#xrefResults { min-height: 40px; }
+
+/* Cosplay cards: the title slot becomes two tappable pills
+   (character + cosplayer). The .pills modifier drops the line-clamp the plain
+   title uses so both pills are visible and wrap. */
+.card .meta .t.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  -webkit-line-clamp: none;
+  -webkit-box-orient: horizontal;
+}
+.card .meta .t.pills a.pill.link {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 10px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Unified Library page (#/library) ---------- */
+.library { max-width: var(--maxw); }
+
+/* Favorites / History tabs. */
+.lib-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.lib-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 17px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 13.5px;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.lib-tab svg { width: 16px; height: 16px; }
+.lib-tab .cnt { font-weight: 600; font-size: 11px; opacity: .8; }
+.lib-tab:hover { color: var(--text); border-color: var(--brand); }
+.lib-tab.active,
+.lib-tab[aria-selected="true"] { background: var(--grad); color: #fff; border-color: transparent; box-shadow: var(--shadow-brand); }
+
+/* Toolbar above the groups (e.g. History "Clear all"). */
+.lib-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.lib-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 12.5px;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.lib-clear svg { width: 15px; height: 15px; }
+.lib-clear:hover { color: var(--brand-3); border-color: color-mix(in srgb, var(--brand-3) 45%, var(--border)); background: color-mix(in srgb, var(--brand-3) 10%, transparent); }
+
+/* Per-kind group sections (Anime, Donghua, Comics, Novel, Cosplay, Doujin). */
+.lib-group { margin: 22px 0 8px; }
+.lib-group:first-of-type { margin-top: 6px; }
+.lib-group-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 14px;
+}
+.lib-group-head h2 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: -0.3px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.lib-group-head h2 .dot { width: 9px; height: 22px; border-radius: 4px; background: linear-gradient(var(--brand), var(--brand-2)); }
+.lib-group-head .cnt-badge { margin-left: 2px; }
+
+/* Per-entry remove control overlaid on a Library card. */
+.card .lib-rm {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, .62);
+  color: #fff;
+  opacity: 0;
+  transition: opacity .16s, background .16s, transform .12s;
+}
+.card .lib-rm svg { width: 15px; height: 15px; }
+.card:hover .lib-rm { opacity: 1; }
+.card .lib-rm:hover { background: var(--brand-3); transform: scale(1.06); }
+/* Touch devices: no hover, so keep the control reachable. */
+@media (hover: none) { .card .lib-rm { opacity: .82; } }
+
+/* Empty-state per tab (Req 5.6). Mirrors the shared .empty look but adds a
+   touch more presence for a full-page state. */
+.lib-empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 64px 20px;
+}
+.lib-empty .lib-empty-ico {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 14px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+}
+.lib-empty .lib-empty-ico svg { width: 28px; height: 28px; opacity: .7; }
+.lib-empty h3 { margin: 0 0 6px; font-size: 17px; color: var(--text); }
+.lib-empty p { margin: 0; font-size: 14px; }
+
+/* Unavailable entry state (stale id with no re-resolution match, Req 7.5):
+   keep the stored metadata visible but dim it and flag it. */
+.card.unavailable { opacity: .68; }
+.card.unavailable:hover { transform: none; border-color: var(--border-soft); box-shadow: none; }
+.card.unavailable .poster img,
+.card.unavailable .poster .ph { filter: grayscale(.65); }
+.card .badge.unavail { background: var(--warn); color: #0b0d12; }
+.lib-unavail-note { margin-top: 5px; color: var(--warn); font-size: 11.5px; font-weight: 700; }
+
+/* ---------- Lite mode overrides (personalization) ----------
+   The global [data-lite] rule already strips animation/transition; these kill
+   the remaining transform-based hover effects so low-end devices paint once. */
+html[data-lite] #searchSuggest { animation: none !important; }
+html[data-lite] .fav-btn.on svg,
+html[data-lite] .fav-btn[aria-pressed="true"] svg,
+html[data-lite] .card .lib-rm:hover,
+html[data-lite] .lib-tab:hover { transform: none !important; }
