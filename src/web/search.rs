@@ -22,6 +22,14 @@ pub enum SearchSource {
     Novelid,
     /// otakudesu.blog HTML-based anime search
     Otakudesu,
+    /// otakudesu.fit (themesia) anime search
+    Otakudesufit,
+    /// lmanime.com HTML-based anime/donghua search (English & multi-sub)
+    Lmanime,
+    /// LayarKaca21 movies — keyword search via a JSON API
+    Lk21,
+    /// NekoPoi adult anime — `/search/<q>` HTML results
+    Nekopoi,
 }
 
 impl SearchSource {
@@ -34,6 +42,10 @@ impl SearchSource {
             SearchSource::Nhentai => "nhentai",
             SearchSource::Novelid => "novelid",
             SearchSource::Otakudesu => "otakudesu",
+            SearchSource::Otakudesufit => "otakudesufit",
+            SearchSource::Lmanime => "lmanime",
+            SearchSource::Lk21 => "lk21",
+            SearchSource::Nekopoi => "nekopoi",
         }
     }
 
@@ -46,6 +58,10 @@ impl SearchSource {
             "nhentai" | "nh" => Some(Self::Nhentai),
             "novelid" | "novel" | "nv" => Some(Self::Novelid),
             "otakudesu" | "anime" | "od" => Some(Self::Otakudesu),
+            "otakudesufit" | "of" => Some(Self::Otakudesufit),
+            "lmanime" | "lm" => Some(Self::Lmanime),
+            "lk21" | "movie" | "film" => Some(Self::Lk21),
+            "nekopoi" | "neko" | "hentai" | "np" => Some(Self::Nekopoi),
             _ => None,
         }
     }
@@ -83,7 +99,172 @@ pub fn build_search_url(source: SearchSource, query: &str, page: u32) -> Option<
             query,
             page.max(1),
         )),
+        SearchSource::Otakudesufit => {
+            Some(crate::adapters::otakudesufit::OtakudesufitAdapter::search_url(query, page.max(1)))
+        }
+        SearchSource::Lmanime => Some(crate::adapters::lmanime::LmanimeAdapter::search_url(
+            query,
+            page.max(1),
+        )),
+        SearchSource::Lk21 => None, // keyword search via JSON API (separate path)
+        SearchSource::Nekopoi => Some(crate::adapters::nekopoi::NekopoiAdapter::search_url(
+            query,
+            page.max(1),
+        )),
     }
+}
+
+/// LayarKaca21 keyword-search JSON API. The site's SPA calls
+/// `<search_url>search.php?s=<q>&page=<n>` (search_url = gudangvape.com) and
+/// renders the returned `{ totalPages, data: [...] }`.
+pub fn lk21_search_api_url(query: &str, page: u32) -> String {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    let q = utf8_percent_encode(query, NON_ALPHANUMERIC).to_string();
+    format!(
+        "https://gudangvape.com/search.php?s={}&page={}",
+        q,
+        page.max(1)
+    )
+}
+
+/// Poster CDN base used by lk21 (posters are stored as relative paths).
+pub const LK21_POSTER_BASE: &str = "https://poster.showcdnx.com/wp-content/uploads/";
+
+/// Parse the lk21 JSON search response into unified search items.
+pub fn parse_lk21_search_json(v: &serde_json::Value) -> Vec<SearchResultItem> {
+    let arr = v
+        .get("data")
+        .or_else(|| v.get("items"))
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let base = crate::adapters::lk21::LK21_BASE;
+    let mut out = Vec::new();
+    for it in arr {
+        let slug = it.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+        if slug.is_empty() {
+            continue;
+        }
+        let title = it
+            .get("title")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let url = format!("{}/{}", base, slug);
+        let poster = it
+            .get("poster")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|p| format!("{}{}", LK21_POSTER_BASE, p));
+        let mut tags = Vec::new();
+        if let Some(y) = it.get("year").and_then(|y| y.as_i64()) {
+            tags.push(y.to_string());
+        }
+        if let Some(q) = it.get("quality").and_then(|q| q.as_str()) {
+            if !q.is_empty() {
+                tags.push(q.to_string());
+            }
+        }
+        out.push(SearchResultItem {
+            source: "lk21".to_string(),
+            title,
+            url,
+            thumbnail: poster,
+            kind: Some("movie".to_string()),
+            snippet: None,
+            tags,
+            cosplayer: None,
+            character: None,
+            series: None,
+        });
+    }
+    out
+}
+
+/// Parse an lk21 browse listing (static `.poster` card grid) into unified
+/// search items.
+pub fn parse_lk21_listing(base_url: &str, html: &str) -> Vec<SearchResultItem> {
+    let parser = HtmlParser::parse(html);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for el in
+        parser.select_all("article[itemtype*='Movie'], article[itemtype*='TVSeries'], article")
+    {
+        let anchor = match el
+            .select(&scraper::Selector::parse("a[href]").unwrap())
+            .find(|a| {
+                a.value()
+                    .attr("href")
+                    .map(|h| {
+                        crate::adapters::lk21::Lk21Adapter::is_detail_url(&resolve_url(base_url, h))
+                    })
+                    .unwrap_or(false)
+            }) {
+            Some(a) => a,
+            None => continue,
+        };
+        let url = resolve_url(base_url, anchor.value().attr("href").unwrap_or(""));
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        let img = el.select(&scraper::Selector::parse("img").unwrap()).next();
+        let title = img
+            .as_ref()
+            .and_then(|i| i.value().attr("alt"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                el.select(&scraper::Selector::parse(".poster-title").unwrap())
+                    .next()
+                    .map(|n| n.text().collect::<String>().trim().to_string())
+            })
+            .or_else(|| anchor.value().attr("title").map(|t| t.trim().to_string()))
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        let thumbnail = img.and_then(|i| {
+            let v = i.value();
+            v.attr("data-src")
+                .or_else(|| v.attr("src"))
+                .filter(|s| !s.is_empty() && !s.starts_with("data:"))
+                .map(|s| resolve_url(base_url, s))
+                .or_else(|| {
+                    // responsive <picture><source srcset> fallback
+                    v.attr("srcset")
+                        .and_then(|ss| ss.split_whitespace().next())
+                        .map(|s| resolve_url(base_url, s))
+                })
+        });
+        let mut tags = Vec::new();
+        for sel in [".year", ".quality", ".episode"] {
+            if let Some(n) = el.select(&scraper::Selector::parse(sel).unwrap()).next() {
+                let t = n.text().collect::<String>().trim().to_string();
+                if !t.is_empty() && t.len() < 16 && !tags.contains(&t) {
+                    tags.push(t);
+                }
+            }
+        }
+        out.push(SearchResultItem {
+            source: "lk21".to_string(),
+            title: title
+                .trim_end_matches(|c: char| !c.is_alphanumeric() && c != ')')
+                .to_string(),
+            url,
+            thumbnail,
+            kind: Some("movie".to_string()),
+            snippet: None,
+            tags,
+            cosplayer: None,
+            character: None,
+            series: None,
+        });
+    }
+    out
 }
 
 /// Build a Mangaball search URL endpoint (POSTed elsewhere)
@@ -144,7 +325,185 @@ pub fn parse_search_html(
         }
         SearchSource::Novelid => parse_novelid_search(base_url, html),
         SearchSource::Otakudesu => parse_otakudesu_search(base_url, html),
+        SearchSource::Otakudesufit => parse_otakudesufit_search(base_url, html),
+        SearchSource::Lmanime => parse_lmanime_search(base_url, html),
+        SearchSource::Lk21 => Vec::new(), // browse/search use dedicated parsers
+        SearchSource::Nekopoi => parse_nekopoi_search(base_url, html),
     }
+}
+
+/// Map NekoPoi `/search/<q>` results into unified search items.
+pub fn parse_nekopoi_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
+    crate::adapters::nekopoi::NekopoiAdapter::parse_search(base_url, html)
+        .into_iter()
+        .map(nekopoi_card_to_item)
+        .collect()
+}
+
+/// Map a NekoPoi browse listing (`.nk-post-card`) into unified search items.
+pub fn parse_nekopoi_listing(base_url: &str, html: &str) -> Vec<SearchResultItem> {
+    crate::adapters::nekopoi::NekopoiAdapter::parse_listing(base_url, html)
+        .into_iter()
+        .map(nekopoi_card_to_item)
+        .collect()
+}
+
+fn nekopoi_card_to_item(c: crate::adapters::nekopoi::NekopoiCard) -> SearchResultItem {
+    SearchResultItem {
+        source: "nekopoi".to_string(),
+        title: c.title,
+        url: c.url,
+        thumbnail: c.thumbnail,
+        kind: Some("nekopoi_post".to_string()),
+        snippet: None,
+        tags: Vec::new(),
+        cosplayer: None,
+        character: None,
+        series: None,
+    }
+}
+
+/// Parse otakudesu.fit (themesia) listing/search HTML into search items.
+/// Series live at `/series/<slug>/`.
+pub fn parse_otakudesufit_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
+    let parser = HtmlParser::parse(html);
+    let mut items = Vec::new();
+    for el in parser.select_all(".listupd article.bs, .listupd article, article.bs") {
+        let anchor = match el
+            .select(&scraper::Selector::parse("a[href]").unwrap())
+            .next()
+        {
+            Some(a) => a,
+            None => continue,
+        };
+        let href = match anchor.value().attr("href") {
+            Some(h) if !h.is_empty() => h,
+            _ => continue,
+        };
+        let url = resolve_url(base_url, href);
+        if !url.contains("/series/") {
+            continue;
+        }
+        let title = anchor
+            .value()
+            .attr("title")
+            .map(|s| s.trim().to_string())
+            .or_else(|| {
+                el.select(&scraper::Selector::parse(".tt h2, .tt, h2").unwrap())
+                    .next()
+                    .map(|n| n.text().collect::<Vec<_>>().join("").trim().to_string())
+            })
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        let thumbnail = el
+            .select(&scraper::Selector::parse("img").unwrap())
+            .next()
+            .and_then(|img| {
+                img.value()
+                    .attr("data-src")
+                    .or_else(|| img.value().attr("src"))
+                    .filter(|s| !s.is_empty() && !s.starts_with("data:"))
+                    .map(|s| resolve_url(base_url, s))
+            });
+        let mut tags = Vec::new();
+        for sel in [".typez", ".epx", ".sb", ".status"] {
+            for t in el.select(&scraper::Selector::parse(sel).unwrap()) {
+                let txt = t.text().collect::<Vec<_>>().join("").trim().to_string();
+                if !txt.is_empty() && !tags.contains(&txt) {
+                    tags.push(txt);
+                }
+            }
+        }
+        items.push(SearchResultItem {
+            source: "otakudesufit".to_string(),
+            title,
+            url,
+            thumbnail,
+            kind: Some("anime_series".to_string()),
+            snippet: None,
+            tags,
+            cosplayer: None,
+            character: None,
+            series: None,
+        });
+    }
+    items
+}
+
+/// Parse lmanime.com listing/search HTML (`.listupd article.bs`) into unified
+/// search items. Series live at root-level slugs; episode/taxonomy links are
+/// filtered out.
+pub fn parse_lmanime_search(base_url: &str, html: &str) -> Vec<SearchResultItem> {
+    let parser = HtmlParser::parse(html);
+    let mut items = Vec::new();
+
+    for el in parser.select_all(".listupd article.bs, .listupd article, article.bs") {
+        let anchor = match el
+            .select(&scraper::Selector::parse("a[href]").unwrap())
+            .next()
+        {
+            Some(a) => a,
+            None => continue,
+        };
+        let href = match anchor.value().attr("href") {
+            Some(h) if !h.is_empty() => h,
+            _ => continue,
+        };
+        let url = resolve_url(base_url, href);
+        if !crate::adapters::lmanime::LmanimeAdapter::is_series_url(&url) {
+            continue;
+        }
+
+        let title = anchor
+            .value()
+            .attr("title")
+            .map(|s| s.trim().to_string())
+            .or_else(|| {
+                el.select(&scraper::Selector::parse(".tt h2, .tt, h2").unwrap())
+                    .next()
+                    .map(|n| n.text().collect::<Vec<_>>().join("").trim().to_string())
+            })
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+
+        let thumbnail = el
+            .select(&scraper::Selector::parse("img").unwrap())
+            .next()
+            .and_then(|img| {
+                img.value()
+                    .attr("data-src")
+                    .or_else(|| img.value().attr("src"))
+                    .map(|s| resolve_url(base_url, s))
+            });
+
+        let mut tags = Vec::new();
+        for sel in [".typez", ".epx", ".sb", ".status"] {
+            for t in el.select(&scraper::Selector::parse(sel).unwrap()) {
+                let txt = t.text().collect::<Vec<_>>().join("").trim().to_string();
+                if !txt.is_empty() && !tags.contains(&txt) {
+                    tags.push(txt);
+                }
+            }
+        }
+
+        items.push(SearchResultItem {
+            source: "lmanime".to_string(),
+            title,
+            url,
+            thumbnail,
+            kind: Some("lmanime_series".to_string()),
+            snippet: None,
+            tags,
+            cosplayer: None,
+            character: None,
+            series: None,
+        });
+    }
+    items
 }
 
 /// Parse otakudesu.blog anime search HTML into unified search items.
@@ -458,8 +817,10 @@ fn clean_cosplay_title(raw: &str) -> String {
     use once_cell::sync::Lazy;
     // "<N> photos/images/pics/videos/clips/..." anywhere in the title.
     static COUNT_RE: Lazy<regex::Regex> = Lazy::new(|| {
-        regex::Regex::new(r"(?i)\s*\d+\s*(?:photos?|images?|pics?|pictures?|videos?|clips?|movies?)")
-            .unwrap()
+        regex::Regex::new(
+            r"(?i)\s*\d+\s*(?:photos?|images?|pics?|pictures?|videos?|clips?|movies?)",
+        )
+        .unwrap()
     });
     // Dangling connectors left after removing counts (e.g. "Foo Bar and").
     static TRAILING_CONN_RE: Lazy<regex::Regex> =
@@ -973,6 +1334,8 @@ pub fn content_kind(c: &ContentModel) -> &'static str {
         ContentModel::CosplayPost(_) => "cosplay_post",
         ContentModel::NovelSeries(_) => "novel_series",
         ContentModel::NovelChapter(_) => "novel_chapter",
+        ContentModel::Movie(_) => "movie",
+        ContentModel::NekopoiPost(_) => "nekopoi_post",
         ContentModel::Generic(_) => "generic",
         ContentModel::DeepPage(_) => "deep_page",
         ContentModel::JsonApi(_) => "json_api",

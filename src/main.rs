@@ -415,7 +415,7 @@ async fn handle_serve(bind: &str, cli: &Cli, sysspec: SysSpec) -> anyhow::Result
         clean: CleanLevel::None,
     };
     let engine = ScraperEngine::with_options(config, options)?;
-    let codec = opaque::OpaqueCodec::from_env_or_random();
+    let codec = opaque::OpaqueCodec::from_env_or_persisted();
     let state = web::api::ApiState::new(engine, codec, sysspec, web_config);
 
     let addr: std::net::SocketAddr = bind

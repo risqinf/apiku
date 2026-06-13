@@ -80,18 +80,27 @@
     const resolveUrl = wrap.dataset.resolve;
     const idx = wrap.dataset.idx;
     const video = wrap.querySelector("video");
-    const clear = ()=>{ const s = document.getElementById(`hls-state-${idx}`); if(s) s.remove(); };
-    const fail = (msg, src)=>{
-      const state = document.getElementById(`hls-state-${idx}`);
-      if(state) state.innerHTML = `<div class="hls-err">${escHtml(msg)}${src?`<br><a class="btn sm" href="${escAttr(src)}" target="_blank" rel="noopener noreferrer">Open directly</a>`:""}</div>`;
-    };
     try{
       // resolveUrl is /api/v1/cosplay-video?... ; strip the /api/v1 prefix for api()
       const rel = resolveUrl.replace(/^.*\/api\/v1/, "");
       const res = await api(rel);
       const src = res && res.url;
-      if(!src){ fail("Stream not found"); return; }
-
+      if(!src){ hlsFail(idx, "Stream not found"); return; }
+      attachHlsSrc(video, idx, src);
+    }catch(e){ hlsFail(idx, e.message || "Failed to load video"); }
+  }
+  function hlsClear(idx){ const s = document.getElementById(`hls-state-${idx}`); if(s) s.remove(); }
+  function hlsFail(idx, msg, src){
+    const state = document.getElementById(`hls-state-${idx}`);
+    if(state) state.innerHTML = `<div class="hls-err">${escHtml(msg)}${src?`<br><a class="btn sm" href="${escAttr(src)}" target="_blank" rel="noopener noreferrer">Open directly</a>`:""}</div>`;
+  }
+  // Attach an already-resolved HLS master URL to a <video> element. Shared by
+  // the cosplay player and the movie player (which resolves the URL itself, so
+  // it can avoid a second resolve round-trip).
+  async function attachHlsSrc(video, idx, src){
+    const clear = ()=>hlsClear(idx);
+    const fail = (msg, s)=>hlsFail(idx, msg, s);
+    try{
       // IMPORTANT: prefer hls.js (Media Source Extensions) wherever it works.
       // Android Chrome advertises native HLS via canPlayType() but its native
       // playback is unreliable — it stalls in a load/ended/reload loop stuck at
@@ -177,29 +186,46 @@
     // Favorite control icon. Outline by default; the .fav-btn.on /
     // [aria-pressed="true"] CSS fills it (fill: currentColor) for the saved state.
     heart:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-4.5-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 6c-2.5 4.5-9.5 9-9.5 9z"/></svg>',
+    // Release-schedule icon: rounded calendar frame, two top binding ticks and
+    // a divider line under the header (used by the Donghua Schedule nav item).
+    calendar:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>',
   };
 
   // ---- Provider config ---------------------------------------------------
   const PROVIDERS = {
-    anime:   { label: "Anime",   api: "otakudesu",   kind: "anime",   adult: false, icon: I.anime },
+    anime:   { label: "Anime",   api: "anime",       kind: "anime",   adult: false, icon: I.anime },
     donghua: { label: "Donghua", api: "anichin",     kind: "donghua", adult: false, icon: I.donghua },
+    lmanime: { label: "Anime EN", api: "lmanime",    kind: "lmanime", adult: false, icon: I.anime },
+    movie:   { label: "Movies",   api: "lk21",       kind: "movie",   adult: false, icon: I.donghua },
     manga:   { label: "Comics",  api: "mangaball",   kind: "manga",   adult: false, icon: I.manga },
     novel:   { label: "Novel",   api: "novelid",     kind: "novel",   adult: false, icon: I.novel },
     cosplay: { label: "Cosplay", api: "cosplaytele", kind: "cosplay", adult: true,  icon: I.cosplay },
     doujin:  { label: "Doujin",  api: "nhentai",     kind: "doujin",  adult: true,  icon: I.doujin },
+    nekopoi: { label: "Hentai",  api: "nekopoi",     kind: "nekopoi", adult: true,  icon: I.anime },
   };
   const EPISODE_SIZE = 5000; // donghua: fetch the whole episode list at once
 
-  const FEEDS = {
-    otakudesu:   [["ongoing","Ongoing"],["complete","Completed"],["action","Action"],["romance","Romance"],["comedy","Comedy"],["fantasy","Fantasy"],["adventure","Adventure"],["drama","Drama"]],
-    anichin:     [["home","Latest"],["popular","Popular"],["rating","Rating"],["title","A-Z"]],
-    mangaball:   [["home","Featured"],["popular","Popular"],["latest","Latest"],["recommend","Recommended"]],
-    novelid:     [["home","All"],["popular","Completed"],["novel-translate","Translated"],["fantasi","Fantasy"],["romantis","Romance"],["aksi","Action"],["horror","Horror"]],
-    cosplaytele: [["home","Latest"],["popular","Popular"]],
-    nhentai:     [["popular-today","Today"],["popular-week","This Week"],["popular","All Time"],["home","Latest"]],
+  // anime-like providers share the mirror-resolve player pipeline. Each maps
+  // to its API base, stream-resolver endpoint, watch route, and browse key.
+  const ANIME_LIKE = {
+    anime:   { api: "anime",   stream: "anime-stream",   watch: "watchanime", label: "Anime",    browse: "anime" },
+    lmanime: { api: "lmanime", stream: "lmanime-stream", watch: "watchlm",    label: "Anime EN", browse: "lmanime" },
   };
 
-  const DETAIL_EP = { anime:"anime", donghua:"donghua", manga:"manga", novel:"novel", cosplay:"cosplay", doujin:"nhentai" };
+  const FEEDS = {
+    otakudesu:   [["ongoing","Ongoing"],["complete","Completed"],["action","Action"],["romance","Romance"],["comedy","Comedy"],["fantasy","Fantasy"],["adventure","Adventure"],["drama","Drama"],["horror","Horror"],["mystery","Mystery"],["sci-fi","Sci-Fi"],["slice-of-life","Slice of Life"],["supernatural","Supernatural"],["school","School"]],
+    anime:       [["ongoing","Ongoing"],["completed","Completed"],["action","Action"],["romance","Romance"],["comedy","Comedy"],["fantasy","Fantasy"],["adventure","Adventure"],["drama","Drama"],["horror","Horror"],["mystery","Mystery"],["sci-fi","Sci-Fi"],["slice-of-life","Slice of Life"],["supernatural","Supernatural"],["school","School"]],
+    anichin:     [["home","Latest"],["popular","Popular"],["rating","Rating"],["title","A-Z"]],
+    lmanime:     [["ongoing","Ongoing"],["all","A-Z"],["action","Action"],["fantasy","Fantasy"],["romance","Romance"],["comedy","Comedy"],["adventure","Adventure"],["mystery","Mystery"],["isekai","Isekai"],["cultivation","Cultivation"],["drama","Drama"]],
+    lk21:        [["populer","Popular"],["latest","Latest"],["rating","Rating"],["release","By Year"],["nontondrama","Series"],["action","Action"],["drama","Drama"],["horror","Horror"],["comedy","Comedy"],["thriller","Thriller"],["sci-fi","Sci-Fi"],["romance","Romance"],["animation","Animation"]],
+    mangaball:   [["home","Featured"],["popular","Popular"],["latest","Latest"],["recommend","Recommended"]],
+    novelid:     [["home","All"],["popular","Completed"],["novel-translate","Translated"],["fantasi","Fantasy"],["romantis","Romance"],["aksi","Action"],["horror","Horror"],["komedi","Comedy"],["religi","Religi"],["motivasi","Motivasi"],["sastra","Sastra"],["novel-anak","Anak"]],
+    cosplaytele: [["home","Latest"]],
+    nhentai:     [["popular-today","Popular Today"],["popular-week","Popular Week"],["popular","All Time"],["home","Recent"]],
+    nekopoi:     [["latest","Latest"],["hentai","Hentai"],["3d","3D"],["2d","2D Animation"],["jav","JAV"],["jav-cosplay","JAV Cosplay"]],
+  };
+
+  const DETAIL_EP = { anime:"anime", donghua:"donghua", lmanime:"lmanime", movie:"movie", manga:"manga", novel:"novel", cosplay:"cosplay", doujin:"nhentai", nekopoi:"nekopoi" };
 
   // ---- Preferences --------------------------------------------------------
   const store = {
@@ -233,6 +259,25 @@
     const SCHEMA_VERSION = 1;
     const KEYS = { fav: "apiku.fav.v1", search: "apiku.search.v1" };
     const IDB  = { db: "apiku", version: 1, store: "history", keyPath: "opaqueId", index: "byTime", indexKey: "timestamp" };
+
+    // stableKey(id): a content identity that survives opaque-ID rotation. An
+    // opaque ID is `<src><kind><nonce>.<base64url(url)>.<mac>`; the nonce and
+    // mac vary per issuance / signing-secret, but the source code and the
+    // base64url(url) payload do NOT. We key favorites/history on
+    // `<src>:<payload>` so a saved item still matches itself after a restart,
+    // a re-fetch (fresh nonce), or a secret change — no more orphaned, no-image
+    // entries.
+    function stableKey(id){
+      if(id == null) return "";
+      const s = String(id);
+      const dot = s.indexOf(".");
+      if(dot < 2) return s; // not an opaque token; use as-is
+      const src = s.slice(0, 2);
+      let payload = s.slice(dot + 1);
+      const dot2 = payload.indexOf(".");
+      if(dot2 !== -1) payload = payload.slice(0, dot2);
+      return payload ? (src + ":" + payload) : s;
+    }
 
     // -- versioned blob wrapper + migration --------------------------------
     // localStorage collections are stored as { v:1, items:[...] }.
@@ -289,7 +334,7 @@
       if(adultOn()) return arr.slice();
       return arr.filter(function(e){
         const k = e && e.kind;
-        return k !== "cosplay" && k !== "doujin";
+        return k !== "cosplay" && k !== "doujin" && k !== "nekopoi";
       });
     }
 
@@ -444,24 +489,28 @@
     const CAPS = { FAVORITES: 1000, SEARCH: 50, HISTORY: 500 };
 
     // ===== favorites (localStorage via backends.fav) — task 2.3 ===========
-    // Keyed by opaqueId, stored most-recent-first (front = most recent).
-    function favKey(e){ return e && e.opaqueId; }
+    // Identity is the stable content key (survives opaque-ID rotation), not the
+    // raw opaqueId. Stored most-recent-first (front = most recent).
+    function favKey(e){ return e ? (e.key || stableKey(e.opaqueId)) : undefined; }
 
     // Build a persisted entry from a RichMetadata-shaped object, guaranteeing a
-    // timestamp (preserved when the caller already supplied one, Req 4.5).
+    // timestamp (preserved when the caller already supplied one, Req 4.5) and a
+    // stable content key derived from the opaqueId.
     function withTimestamp(meta){
       const entry = Object.assign({}, (meta && typeof meta === "object") ? meta : {});
       if(entry.timestamp == null) entry.timestamp = Date.now();
+      if(!entry.key && entry.opaqueId != null) entry.key = stableKey(entry.opaqueId);
       return entry;
     }
 
     function listFavoritesImpl(){ return backends.fav.load(); }
 
     function isFavoriteImpl(opaqueId){
-      return listFavoritesImpl().some(function(e){ return favKey(e) === opaqueId; });
+      const k = stableKey(opaqueId);
+      return listFavoritesImpl().some(function(e){ return favKey(e) === k; });
     }
 
-    // Dedupe + move-to-front by opaqueId, then cap to CAPS.FAVORITES by
+    // Dedupe + move-to-front by stable key, then cap to CAPS.FAVORITES by
     // trimming the oldest (tail) entries.
     function addFavoriteImpl(meta){
       const entry = withTimestamp(meta);
@@ -469,9 +518,10 @@
       backends.fav.save(next);
     }
 
-    // Remove only the entry matching opaqueId; everything else is preserved.
+    // Remove only the entry matching the stable key of opaqueId.
     function removeFavoriteImpl(opaqueId){
-      const next = listFavoritesImpl().filter(function(e){ return favKey(e) !== opaqueId; });
+      const k = stableKey(opaqueId);
+      const next = listFavoritesImpl().filter(function(e){ return favKey(e) !== k; });
       backends.fav.save(next);
     }
 
@@ -484,11 +534,14 @@
       return res.added;
     }
 
-    // Self-heal rewrite: replace the opaqueId of the matching favorite while
-    // preserving its metadata and list position (Req 7.4 helper).
+    // Self-heal rewrite: refresh the opaqueId (and any newer metadata) of the
+    // favorite whose stable key matches, preserving its list position (Req 7.4).
     function updateFavoriteIdImpl(oldId, newId){
+      const k = stableKey(oldId);
       const next = listFavoritesImpl().map(function(e){
-        return favKey(e) === oldId ? Object.assign({}, e, { opaqueId: newId }) : e;
+        return favKey(e) === k
+          ? Object.assign({}, e, { opaqueId: newId, key: stableKey(newId) })
+          : e;
       });
       backends.fav.save(next);
     }
@@ -596,20 +649,50 @@
     async function recordHistoryImpl(meta){
       const base = (meta && typeof meta === "object") ? meta : {};
       if(base.opaqueId == null) return;
+      const key = base.key || stableKey(base.opaqueId);
       const existing = await backends.history.getAll();
       let maxTs = 0;
       for(const e of existing){ const t = (e && e.timestamp) || 0; if(t > maxTs) maxTs = t; }
-      const entry = Object.assign({}, base, { timestamp: Math.max(Date.now(), maxTs + 1) });
+      // Find any prior record for the same content (possibly under a rotated id)
+      // so we can both re-key it and carry its richer fields forward.
+      const prior = existing.find(function(e){
+        return e && (e.key || stableKey(e.opaqueId)) === key;
+      }) || {};
+      for(const e of existing){
+        if(e && (e.key || stableKey(e.opaqueId)) === key && e.opaqueId !== base.opaqueId){
+          await safeWrite(function(){ return backends.history.delete(e.opaqueId); });
+        }
+      }
+      // Merge: new meta wins, but never let a missing/empty field erase a good
+      // prior value (e.g. opening the series page must not wipe "Ep 14"
+      // progress recorded while watching).
+      const entry = Object.assign({}, prior, base, {
+        key,
+        timestamp: Math.max(Date.now(), maxTs + 1),
+      });
+      if((base.thumbnail == null || base.thumbnail === "") && prior.thumbnail) entry.thumbnail = prior.thumbnail;
+      if(base.progress == null && prior.progress) entry.progress = prior.progress;
+      if((base.title == null || base.title === "") && prior.title) entry.title = prior.title;
       await safeWrite(function(){ return backends.history.put(entry); });
       const after = await backends.history.getAll();
       if(after.length > CAPS.HISTORY) await evictOldestHistory(after.length - CAPS.HISTORY);
     }
 
     // listHistory(): most-recent-first (descending timestamp). The store has no
-    // inherent order, so we sort on read (Req 3.8 ordering).
+    // inherent order, so we sort on read (Req 3.8 ordering). Also collapses any
+    // residual same-key duplicates (keeping the most recent) as a safety net.
     async function listHistoryImpl(){
       const all = await backends.history.getAll();
-      return byTimestampAsc(all).reverse();
+      const ordered = byTimestampAsc(all).reverse();
+      const seen = new Set();
+      const out = [];
+      for(const e of ordered){
+        const k = e && (e.key || stableKey(e.opaqueId));
+        if(k != null && seen.has(k)) continue;
+        if(k != null) seen.add(k);
+        out.push(e);
+      }
+      return out;
     }
 
     // removeHistory(opaqueId): delete only the matching entry.
@@ -683,6 +766,8 @@
 
       // adult-gated visibility filter (task 2.2)
       visible:          safe(visible, function(){ return []; }),
+      // stable content key derived from an opaque id (survives id rotation)
+      stableKey:        safe(stableKey, ""),
     };
   })();
 
@@ -758,13 +843,17 @@
       ["home", "#/", "Home", I.home, false],
       ["anime", "#/browse/anime", "Anime", I.anime, false],
       ["donghua", "#/browse/donghua", "Donghua", I.donghua, false],
+      ["lmanime", "#/browse/lmanime", "Anime EN", I.anime, false],
+      ["movie", "#/browse/movie", "Movies", I.donghua, false],
       ["manga", "#/browse/manga", "Comics", I.manga, false],
       ["novel", "#/browse/novel", "Novel", I.novel, false],
+      ["schedule", "#/schedule", "Schedule", I.calendar, false],
       ["library", "#/library", "Library", I.book, false],
     ];
     if (adultOn()) {
       items.push(["cosplay", "#/browse/cosplay", "Cosplay", I.cosplay, true]);
       items.push(["doujin", "#/browse/doujin", "Doujin", I.doujin, true]);
+      items.push(["nekopoi", "#/browse/nekopoi", "Hentai", I.anime, true]);
     }
     return items;
   }
@@ -792,8 +881,10 @@
       case "detail": return parts[1] || "";          // kind: anime/donghua/manga/novel/cosplay/doujin
       case "watch":  return "donghua";
       case "watchanime": return "anime";
+      case "watchlm": return "lmanime";
       case "read":   return parts[1] === "nhentai" ? "doujin" : (parts[1] || "");
       case "xref":   return "cosplay";                // cosplay cross-reference -> Cosplay nav
+      case "schedule": return "schedule";             // donghua release schedule
       case "library": return "library";
       case "docs":   return "docs";
       case "explorer": return "explorer";
@@ -833,10 +924,13 @@
   let _chromeBuilt = false;
   let _navAdult = null; // adult state the nav markup was last built with
 
-  // Build the desktop nav markup (provider links + the "More" tools menu).
+  // Build the desktop nav markup: provider links split across two centered
+  // rows (so a growing navbar stays tidy) plus the "More" tools menu.
   function deskNavMarkup(links, tools, seg){
-    return links.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")+
-      `<div class="navmore">
+    const half = Math.ceil(links.length / 2);
+    const row1 = links.slice(0, half);
+    const row2 = links.slice(half);
+    const navmore = `<div class="navmore">
           <button class="navmore-btn ${tools.some(t=>t[0]===seg)?"active":""}" id="moreBtn" aria-haspopup="true" aria-expanded="false">${I.dots}</button>
           <div class="navmore-menu" id="moreMenu">
             ${tools.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}
@@ -848,6 +942,10 @@
             </button>
           </div>
         </div>`;
+    return (
+      `<div class="nav-row">${row1.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}</div>` +
+      `<div class="nav-row">${row2.map(([s,href,label,ico,adult])=>navItem(s,href,label,ico,adult,seg)).join("")}${navmore}</div>`
+    );
   }
 
   // Refresh the nav: rebuild link markup only when the adult set changed
@@ -928,18 +1026,21 @@
       </aside>
 
       <header class="hdr">
-        <button class="icon-btn hamburger" id="hamburger">${I.menu}</button>
-        <a class="brand" href="#/">${brandMark()}</a>
-        <nav class="desktop" id="deskNav"></nav>
-        <div class="spacer"></div>
-        <form class="searchbox" id="searchform">
-          ${I.search}
-          <input id="searchinput" type="search" placeholder="Search titles..." autocomplete="off"
-                 role="combobox" aria-autocomplete="list" aria-controls="searchSuggest" aria-expanded="false">
-          <div id="searchSuggest" role="listbox" aria-label="Recent searches" hidden></div>
-        </form>
-        <button class="icon-btn ${adultOn()?"on":""}" id="adultBtn" title="18+ Content">18+</button>
-        <button class="icon-btn" id="themeBtn" title="Toggle theme">${themeIco}</button>
+        <div class="hdr-top">
+          <button class="icon-btn hamburger" id="hamburger">${I.menu}</button>
+          <a class="brand" href="#/">${brandMark()}</a>
+          <form class="searchbox" id="searchform">
+            ${I.search}
+            <input id="searchinput" type="search" placeholder="Search titles..." autocomplete="off"
+                   role="combobox" aria-autocomplete="list" aria-controls="searchSuggest" aria-expanded="false">
+            <div id="searchSuggest" role="listbox" aria-label="Recent searches" hidden></div>
+          </form>
+          <button class="icon-btn ${adultOn()?"on":""}" id="adultBtn" title="18+ Content">18+</button>
+          <button class="icon-btn" id="themeBtn" title="Toggle theme">${themeIco}</button>
+        </div>
+        <div class="hdr-nav">
+          <nav class="desktop" id="deskNav"></nav>
+        </div>
       </header>
       <main id="view"></main>
       <footer>${footerHtml()}</footer>`;
@@ -948,9 +1049,15 @@
     const form = document.getElementById("searchform");
     const input = document.getElementById("searchinput");
     const suggest = document.getElementById("searchSuggest");
-    let suggRows = [];   // SearchEntry[] backing the currently rendered rows
+    // suggRows is a unified, visual-order list of row descriptors:
+    //   { type:"suggest", data:Suggestion }  — live catalog suggestion (no ×)
+    //   { type:"history", data:SearchEntry } — local search history (has ×)
+    // data-idx on each `.sugg-row` indexes into this array, so the keyboard
+    // highlight + Enter + click handlers all traverse both kinds in order.
+    let suggRows = [];
     let suggSel = -1;    // index of the aria-selected row, -1 = none highlighted
     let suggBlurT = null;
+    let suggestT = null; // debounce timer for the live /suggest fetch
 
     const suggOpen = () => suggest && !suggest.hidden;
 
@@ -964,30 +1071,130 @@
       input.removeAttribute("aria-activedescendant");
     }
 
-    // Render the dropdown from a list of SearchEntry objects. Empty list hides
-    // the dropdown entirely (Req 2.8). All query text is escaped via h(...).
-    function renderSuggest(entries){
+    // Render the dropdown from a unified row list. Empty list hides the
+    // dropdown entirely (Req 2.8). All text is escaped via h(...). Live
+    // suggestion rows (`.sugg-row.suggest`) have no remove (×) button; history
+    // rows keep theirs plus the "Clear all" footer.
+    function renderRows(rows){
       if(!suggest) return;
-      suggRows = Array.isArray(entries) ? entries : [];
+      suggRows = Array.isArray(rows) ? rows : [];
       if(!suggRows.length){ closeSuggest(); return; }
       suggSel = -1;
-      const rows = suggRows.map((e,i)=>
-        `<div class="sugg-row" role="option" id="sugg-${i}" data-idx="${i}" aria-selected="false">`
-        + `<span class="sugg-ico">${I.search}</span>`
-        + `<span class="sugg-q">${h(e.query)}</span>`
-        + `<button class="sugg-x" type="button" data-x="${i}" title="Remove" aria-label="Remove ${h(e.query)}">${I.close}</button>`
-        + `</div>`).join("");
-      suggest.innerHTML = rows + `<div class="sugg-foot"><button class="sugg-clear" type="button">Clear all</button></div>`;
+      const hasSuggest = suggRows.some(r=>r.type==="suggest");
+      const hasHistory = suggRows.some(r=>r.type==="history");
+      let html = "";
+      suggRows.forEach((r,i)=>{
+        if(r.type==="suggest"){
+          // Section head before the first suggestion row (only if mixed).
+          if(hasHistory && i===0) html += `<div class="sugg-head">Suggestions</div>`;
+          const d = r.data || {};
+          if(d.type==="tag"){
+            // Faceted tag: "Parody: Genshin Impact" -> chip + name.
+            const m = String(d.label||"").split(/:\s+/);
+            const facet = m.length>1 ? m[0] : "Tag";
+            const name = m.length>1 ? m.slice(1).join(": ") : (d.label||d.value||"");
+            html += `<div class="sugg-row suggest tag" role="option" id="sugg-${i}" data-idx="${i}" aria-selected="false">`
+              + `<span class="sugg-ico">${I.search}</span>`
+              + `<span class="sugg-facet">${h(facet)}</span>`
+              + `<span class="sugg-q">${h(name)}</span>`
+              + `</div>`;
+          } else {
+            const kp = Object.values(PROVIDERS).find(p=>p.kind===d.kind);
+            const kindBadge = kp ? `<span class="sugg-kind">${h(kp.label)}</span>` : "";
+            html += `<div class="sugg-row suggest" role="option" id="sugg-${i}" data-idx="${i}" aria-selected="false">`
+              + `<span class="sugg-ico">${I.search}</span>`
+              + `<span class="sugg-q">${h(d.label)}</span>`
+              + kindBadge
+              + `</div>`;
+          }
+        } else {
+          // Section head before the first history row when suggestions precede it.
+          const firstHist = hasSuggest && !suggRows.slice(0,i).some(x=>x.type==="history");
+          if(firstHist) html += `<div class="sugg-head">Recent</div>`;
+          html += `<div class="sugg-row" role="option" id="sugg-${i}" data-idx="${i}" aria-selected="false">`
+            + `<span class="sugg-ico">${I.search}</span>`
+            + `<span class="sugg-q">${h(r.data.query)}</span>`
+            + `<button class="sugg-x" type="button" data-x="${i}" title="Remove" aria-label="Remove ${h(r.data.query)}">${I.close}</button>`
+            + `</div>`;
+        }
+      });
+      if(hasHistory) html += `<div class="sugg-foot"><button class="sugg-clear" type="button">Clear all</button></div>`;
+      suggest.innerHTML = html;
       suggest.hidden = false;
       input.setAttribute("aria-expanded","true");
       input.removeAttribute("aria-activedescendant");
     }
 
-    // focus -> most-recent-first history (Req 2.3); input -> filtered (Req 2.4).
-    const showRecent = () => renderSuggest(pstore.listSearches());
+    // Wrap a SearchEntry list as history rows.
+    const histRows = (entries)=> (Array.isArray(entries)?entries:[]).map(e=>({ type:"history", data:e }));
+    // Order live suggestions tag-first, then titles, as row descriptors.
+    function suggestRows(list){
+      const arr = Array.isArray(list) ? list : [];
+      const tags = arr.filter(s=>s && s.type==="tag");
+      const titles = arr.filter(s=>s && s.type!=="tag");
+      return tags.concat(titles).map(s=>({ type:"suggest", data:s }));
+    }
+
+    // focus -> most-recent-first history (Req 2.3); input -> filtered (Req 2.4)
+    // plus live catalog suggestions fetched (debounced) from /api/v1/suggest.
+    const showRecent = () => renderRows(histRows(pstore.listSearches()));
     function refreshSuggest(){
       const v = input.value;
-      renderSuggest(v.trim() === "" ? pstore.listSearches() : pstore.filterSearches(v));
+      const trimmed = v.trim();
+      // Always render history immediately so typing never stalls on the network.
+      renderRows(histRows(trimmed === "" ? pstore.listSearches() : pstore.filterSearches(v)));
+
+      if(suggestT){ clearTimeout(suggestT); suggestT = null; }
+      if(trimmed.length < 2) return; // too short to bother the catalog
+      suggestT = setTimeout(async ()=>{
+        const query = trimmed;
+        let list = [];
+        try {
+          const res = await apiCached("/suggest?" + qs({ q: query, source: "all" }));
+          // Out-of-order guard: bail if the user kept typing.
+          if(input.value.trim() !== query) return;
+          list = (res && Array.isArray(res.suggestions)) ? res.suggestions : [];
+        } catch(_){
+          return; // on failure just keep history rows — never break typing
+        }
+        if(input.value.trim() !== query) return;
+        const sugg = suggestRows(list);
+        const hist = histRows(pstore.filterSearches(input.value));
+        renderRows(sugg.concat(hist));
+      }, 200);
+    }
+
+    // Run a query as a normal search (records history + navigates).
+    function runSearch(q){
+      const query = (q==null?"":String(q)).trim();
+      if(!query) return;
+      pstore.recordSearch(query);
+      closeSuggest();
+      go(`#/search/${encodeURIComponent(query)}`);
+    }
+
+    // Act on a live suggestion row. Tags navigate to their exact-tag search
+    // (scoped to doujin when that's the suggestion's kind); titles run a normal
+    // search on the suggestion value. Both record the search for history.
+    function selectSuggestion(s){
+      if(!s) return;
+      const value = (s.value==null?"":String(s.value)).trim();
+      if(!value) return;
+      pstore.recordSearch(value);
+      closeSuggest();
+      if(s.type==="tag" && s.kind==="doujin"){
+        go(`#/search/${encodeURIComponent(value)}/doujin/1`);
+      } else {
+        go(`#/search/${encodeURIComponent(value)}`);
+      }
+    }
+
+    // Dispatch a row (by its unified-list index) to the right action.
+    function activateRow(i){
+      const r = suggRows[i];
+      if(!r) return;
+      if(r.type==="suggest") selectSuggestion(r.data);
+      else runSearch(r.data.query);
     }
 
     // Move the aria-selected highlight, wrapping at both ends.
@@ -1005,18 +1212,13 @@
     }
 
     // Record the query BEFORE navigating to the search route (Req 2.1, 2.5).
-    function runSearch(q){
-      const query = (q==null?"":String(q)).trim();
-      if(!query) return;
-      pstore.recordSearch(query);
-      closeSuggest();
-      go(`#/search/${encodeURIComponent(query)}`);
-    }
+    // (runSearch / selectSuggestion / activateRow are defined above.)
 
     form.addEventListener("submit", (e)=>{
       e.preventDefault();
-      // Enter on a highlighted suggestion selects it; otherwise submit typed text.
-      if(suggOpen() && suggSel >= 0 && suggRows[suggSel]){ runSearch(suggRows[suggSel].query); return; }
+      // Enter on a highlighted row activates it (suggestion vs history);
+      // otherwise submit the typed text as a search.
+      if(suggOpen() && suggSel >= 0 && suggRows[suggSel]){ activateRow(suggSel); return; }
       runSearch(input.value);
     });
 
@@ -1045,8 +1247,8 @@
     suggest.addEventListener("click", (e)=>{
       const x = e.target.closest(".sugg-x");
       if(x){
-        const entry = suggRows[+x.getAttribute("data-x")];
-        if(entry) pstore.removeSearch(entry.query);
+        const r = suggRows[+x.getAttribute("data-x")];
+        if(r && r.type==="history") pstore.removeSearch(r.data.query);
         refreshSuggest();
         return;
       }
@@ -1056,10 +1258,7 @@
         return;
       }
       const row = e.target.closest(".sugg-row");
-      if(row){
-        const entry = suggRows[+row.getAttribute("data-idx")];
-        if(entry) runSearch(entry.query);
-      }
+      if(row){ activateRow(+row.getAttribute("data-idx")); }
     });
 
     // Dismiss on blur (timeout so row clicks register) and on outside click.
@@ -1206,6 +1405,18 @@
     return (character && cosplayer) ? { character, cosplayer } : null;
   }
 
+  // Language badge: distinguishes ID-subbed vs EN-subbed entries (anime shows
+  // up from both otakudesu = ID and lmanime = EN, sometimes the same title in
+  // both), so the source badge alone isn't enough.
+  function langBadge(item){
+    const src = item.source || "";
+    let lang = "";
+    if(src==="lmanime") lang = "EN";
+    else if(src==="otakudesu" || src==="otakudesufit" || src==="anichin") lang = "ID";
+    if(!lang) return "";
+    return `<span class="badge lang ${lang.toLowerCase()}">${lang}</span>`;
+  }
+
   function cardHtml(item){
     const prov = Object.values(PROVIDERS).find(p=>p.kind===item.kind) || {};
     const tags = (item.tags||[]).slice(0,2).map(t=>`<span>${h(t)}</span>`).join("");
@@ -1223,11 +1434,30 @@
       : `<div class="t">${h(item.title)}</div>`;
     return `
       <div class="card" data-go="${detailHref}" data-prefetch-kind="${h(item.kind)}" data-prefetch-id="${h(item.id)}">
-        <div class="poster">${imgTag(item.thumbnail,"",item.title)}<span class="badge src">${h(prov.label||item.source)}</span></div>
+        <div class="poster">${imgTag(item.thumbnail,"",item.title)}<span class="badge src">${h(prov.label||item.source)}</span>${langBadge(item)}</div>
         <div class="meta">${titleHtml}<div class="sub">${tags}</div></div>
       </div>`;
   }
   const grid = (items) => (!items||!items.length) ? `<div class="empty">No results found.</div>` : `<div class="grid">${items.map(cardHtml).join("")}</div>`;
+
+  // ---- Genre pills --------------------------------------------------------
+  // Detail pages list a series' genres. For providers whose /browse accepts an
+  // arbitrary genre slug (otakudesu=anime, novelid=novel) we render each genre
+  // as a tappable pill that jumps to that genre's browse feed, so visitors can
+  // discover everything in e.g. "Romance" or "Horror" with one tap. Providers
+  // without genre browse (donghua, manga) keep plain, non-clickable pills.
+  const GENRE_BROWSE = { anime: true, novel: true, lmanime: true, movie: true };
+  const genreSlug = (g) => String(g||"").trim().toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  function genrePill(kind, g){
+    const slug = genreSlug(g);
+    if(GENRE_BROWSE[kind] && slug){
+      return `<a class="pill link" href="#/browse/${encodeURIComponent(kind)}/${encodeURIComponent(slug)}">${h(g)}</a>`;
+    }
+    return `<span class="pill">${h(g)}</span>`;
+  }
 
   // ---- Pagination (nhentai-style numbered pager) --------------------------
   // Builds `‹ 1 2 … 7 8 [9] 10 11 … 42 ›` given the current page, an optional
@@ -1379,8 +1609,10 @@
     `);
     const rows = document.getElementById("rows");
     let sections = [
-      { title:"Anime Ongoing",   prov:"otakudesu",   feed:"ongoing",       seg:"anime" },
+      { title:"Anime Ongoing",   prov:"anime",       feed:"ongoing",       seg:"anime", dedupe:true },
       { title:"Latest Donghua",  prov:"anichin",     feed:"home",          seg:"donghua" },
+      { title:"Anime EN Ongoing",prov:"lmanime",     feed:"ongoing",       seg:"lmanime" },
+      { title:"Popular Movies",  prov:"lk21",        feed:"populer",       seg:"movie" },
       { title:"Popular Comics",  prov:"mangaball",   feed:"popular",       seg:"manga" },
       { title:"Latest Novels",   prov:"novelid",     feed:"home",          seg:"novel" },
       { title:"Latest Cosplay",  prov:"cosplaytele", feed:"home",          seg:"cosplay", adult:true },
@@ -1390,7 +1622,7 @@
       <div class="row-head"><h2><span class="dot"></span>${h(s.title)}</h2><a class="more" href="#/browse/${s.seg}">View all ${I.arrow}</a></div>
       <div id="row-${i}">${skelGrid(6)}</div>`).join("");
     sections.forEach(async (s,i)=>{
-      try { const data=await apiCached(`/browse/${s.prov}?${qs({feed:s.feed})}`); document.getElementById(`row-${i}`).innerHTML=grid((data.items||[]).slice(0,12)); }
+      try { const data=await apiCached(`/browse/${s.prov}?${qs(Object.assign({feed:s.feed}, s.dedupe?{dedupe:1}:{}))}`); document.getElementById(`row-${i}`).innerHTML=grid((data.items||[]).slice(0,12)); }
       catch(e){ const el=document.getElementById(`row-${i}`); if(el) el.innerHTML=`<div class="errbox">Failed to load.</div>`; }
     });
   }
@@ -1542,6 +1774,125 @@
   }
 
   // ===========================================================================
+  // Donghua release schedule (#/schedule)
+  // ===========================================================================
+  // Weekly release calendar. The server groups upcoming donghua episodes by
+  // weekday; each item is already shaped like a search result (id/kind/title/
+  // thumbnail) so the shared cardHtml/grid renders them as-is, with the
+  // upcoming episode surfaced as a card sub-tag. Cards link to
+  // #/detail/donghua/{id}. Mirrors routeXref for the empty / error states.
+  //
+  // Each item also carries `time_label` (e.g. "at 09:47" / "released") and an
+  // optional `release_at` (unix SECONDS) for upcoming episodes. We surface both
+  // the episode number and the timing as card sub-tags, and — when an episode
+  // is still in the future — render a LIVE countdown that ticks in place.
+
+  // Module-scoped countdown timer. Only one runs at a time: it is cleared at
+  // the start of every routeSchedule() call and self-clears once the schedule
+  // container leaves the DOM (the SPA swaps #view on each route).
+  let _schedTimer = null;
+
+  // Format remaining seconds as "0d 3h 36m". Non-positive input collapses to
+  // "0d 0h 0m" (callers fall back to the time_label/"released" in that case).
+  function fmtCountdown(rem){
+    let r = Math.max(0, Math.floor(rem||0));
+    const d = Math.floor(r/86400);
+    const hours = Math.floor((r%86400)/3600);
+    const mins = Math.floor((r%3600)/60);
+    return `${d}d ${hours}h ${mins}m`;
+  }
+
+  // The timing label for one schedule item at "now": a live countdown for a
+  // future release_at, otherwise the verbatim time_label (or "released").
+  function schedTiming(it){
+    const ra = (it && typeof it.release_at === "number") ? it.release_at : null;
+    const future = ra != null && ra*1000 > Date.now();
+    if(future) return fmtCountdown(ra - Math.floor(Date.now()/1000));
+    return (it && it.time_label) ? String(it.time_label) : "released";
+  }
+
+  async function routeSchedule(){
+    // Clear any countdown timer from a previous visit before we re-render.
+    if(_schedTimer){ clearInterval(_schedTimer); _schedTimer = null; }
+
+    shell(`
+      ${crumbs([{href:"#/",label:"Home"},{label:"Donghua Schedule"}])}
+      <div class="row-head"><h2><span class="dot"></span>Donghua Release Schedule</h2></div>
+      <div id="scheduleBody">${spinner}</div>
+    `);
+
+    // Dedicated schedule-card render: same markup contract as cardHtml (so
+    // [data-go] navigation + pointer prefetch work identically) but with timing
+    // sub-tags that carry a `data-rls` hook for the live countdown. cardHtml's
+    // generic `.sub` tags are plain escaped <span>s and can't carry that hook,
+    // hence this small local renderer. All text stays XSS-safe via h().
+    const schedCard = (it)=>{
+      const prov = Object.values(PROVIDERS).find(p=>p.kind===it.kind) || {};
+      const detailHref = `#/detail/${encodeURIComponent(it.kind)}/${encodeURIComponent(it.id)}`;
+      const ra = (typeof it.release_at === "number") ? it.release_at : null;
+      const epTag = it.episode ? `<span class="sched-eps">${h("Eps "+it.episode)}</span>` : "";
+      const timeTag = `<span class="sched-time"${ra!=null?` data-rls="${h(ra)}"`:""}>${h(schedTiming(it))}</span>`;
+      return `
+      <div class="card" data-go="${detailHref}" data-prefetch-kind="${h(it.kind)}" data-prefetch-id="${h(it.id)}">
+        <div class="poster">${imgTag(it.thumbnail,"",it.title)}<span class="badge src">${h(prov.label||it.source)}</span></div>
+        <div class="meta"><div class="t">${h(it.title)}</div><div class="sub">${epTag}${timeTag}</div></div>
+      </div>`;
+    };
+    const schedGrid = (items)=> (!items||!items.length)
+      ? `<div class="empty">No results found.</div>`
+      : `<div class="grid">${items.map(schedCard).join("")}</div>`;
+
+    const body = document.getElementById("scheduleBody");
+    try{
+      const data = await apiCached("/donghua/schedule");
+      if(!body) return;
+      const days = (data && Array.isArray(data.days)) ? data.days : [];
+      if(!days.length){
+        body.innerHTML = `<div class="empty">No scheduled releases right now.</div>`;
+        return;
+      }
+      // Highlight the current weekday (cheap, locale-based comparison).
+      let today = "";
+      try { today = new Date().toLocaleDateString("en-US",{weekday:"long"}); }catch(_){}
+      let hasFuture = false;
+      body.innerHTML = days.map(d=>{
+        const items = (d.items||[]);
+        items.forEach(it=>{ if(typeof it.release_at === "number" && it.release_at*1000 > Date.now()) hasFuture = true; });
+        const isToday = today && d.day && String(d.day).toLowerCase()===today.toLowerCase();
+        return `<div class="row-head${isToday?" sched-today":""}"><h2><span class="dot"></span>${h(d.day)}</h2></div>`+schedGrid(items);
+      }).join("");
+
+      // Live countdown: recompute the `[data-rls]` labels in place every 60s.
+      // Self-cleans once #scheduleBody leaves the DOM (user navigated away).
+      if(hasFuture){
+        _schedTimer = setInterval(()=>{
+          const el = document.getElementById("scheduleBody");
+          if(!el){ clearInterval(_schedTimer); _schedTimer = null; return; }
+          const now = Math.floor(Date.now()/1000);
+          let anyFuture = false;
+          el.querySelectorAll(".sched-time[data-rls]").forEach(span=>{
+            const ra = +span.getAttribute("data-rls");
+            if(!isFinite(ra)) return;
+            const rem = ra - now;
+            if(rem > 0){ anyFuture = true; span.textContent = fmtCountdown(rem); }
+            else { span.textContent = "released"; span.removeAttribute("data-rls"); }
+          });
+          if(!anyFuture){ clearInterval(_schedTimer); _schedTimer = null; }
+        }, 60000);
+      }
+    }catch(e){
+      if(!body) return;
+      body.innerHTML =
+        `<div class="errbox">`+
+          `<p>Couldn&rsquo;t load the schedule: ${h(e.message||"request failed")}</p>`+
+          `<button type="button" class="btn" id="schedRetry">Retry</button>`+
+        `</div>`;
+      const retry = document.getElementById("schedRetry");
+      if(retry) retry.addEventListener("click", ()=>routeSchedule());
+    }
+  }
+
+  // ===========================================================================
   // Unified Library page (#/library)
   // ===========================================================================
   // Per-kind group order + display labels for the Library sections. "comics" is
@@ -1561,16 +1912,61 @@
   // (Req 5.7). Navigation uses the canonical per-kind route via entryRoute
   // (Req 5.5). A `.lib-rm` remove control is overlaid, carrying `data-stop` so
   // the card's own [data-go] navigation does not fire when it is tapped.
+  // Compact relative time: "just now", "5m", "2h", "3d", "2w", else a date.
+  function relTime(ts){
+    const t = Number(ts);
+    if(!t) return "";
+    const diff = Date.now() - t;
+    if(diff < 0) return "just now";
+    const s = Math.floor(diff/1000);
+    if(s < 60) return "just now";
+    const m = Math.floor(s/60); if(m < 60) return m+"m ago";
+    const hr = Math.floor(m/60); if(hr < 24) return hr+"h ago";
+    const d = Math.floor(hr/24); if(d < 7) return d+"d ago";
+    const w = Math.floor(d/7); if(w < 5) return w+"w ago";
+    try { return new Date(t).toLocaleDateString(); } catch(_){ return ""; }
+  }
+
+  // The per-leaf watch/read route for a stored progress marker — opening a
+  // history entry jumps straight back to the episode/chapter you last left off
+  // at, rather than the series landing page.
+  function progressRoute(kind, pid){
+    if(!pid) return null;
+    const id = encodeURIComponent(pid);
+    switch(kind){
+      case "donghua": return `#/watch/${id}`;
+      case "anime":   return `#/watchanime/${id}`;
+      case "lmanime": return `#/watchlm/${id}`;
+      case "manga":   return `#/read/manga/${id}`;
+      case "novel":   return `#/read/novel/${id}`;
+      case "doujin":  return `#/read/nhentai/${id}`;
+      default:        return null;   // cosplay / movie: no per-leaf resume
+    }
+  }
+
   function libCardHtml(entry, tab){
     const kind = entry && entry.kind;
     const prov = Object.values(PROVIDERS).find(p=>p.kind===kind) || {};
     const id = entry && entry.opaqueId;
-    const route = pstore.entryRoute(kind, id);
+    // Progress chip ("Ep 14" / "Ch. 1182") + last-opened relative time give the
+    // library the "where was I" context the user asked for.
+    const prog = entry && entry.progress;
+    const progLabel = prog && (prog.label || (prog.number!=null ? ((prog.type==="chapter"?"Ch. ":"Ep ")+prog.number) : ""));
+    const when = relTime(entry && entry.timestamp);
+    // When a progress marker carries the leaf id, the card resumes straight to
+    // that episode/chapter; otherwise it opens the series detail page.
+    const resume = (prog && prog.id) ? progressRoute(kind, prog.id) : null;
+    const route = resume || pstore.entryRoute(kind, id);
+    const subBits = [];
+    if(progLabel) subBits.push(`<span class="lib-prog${resume?" resume":""}">${prog && prog.type==="chapter" ? I.book : I.play}${resume?"Resume ":""}${h(progLabel)}</span>`);
+    if(when) subBits.push(`<span class="lib-when">${h(when)}</span>`);
+    const sub = subBits.length ? `<div class="lib-sub">${subBits.join("")}</div>` : "";
+    const resumeBadge = resume ? `<span class="lib-resume-badge" title="Resume ${escAttr(progLabel||"")}">${I.play}</span>` : "";
     return `
       <div class="card" data-go="${escAttr(route)}" data-prefetch-kind="${h(kind)}" data-prefetch-id="${escAttr(id)}">
         <button type="button" class="lib-rm" data-stop data-lib-rm="${escAttr(id)}" data-lib-tab="${h(tab)}" aria-label="Remove">${I.close}</button>
-        <div class="poster">${imgTag(entry&&entry.thumbnail,"",entry&&entry.title)}<span class="badge src">${h(prov.label||kind)}</span></div>
-        <div class="meta"><div class="t">${h(entry&&entry.title)}</div></div>
+        <div class="poster">${imgTag(entry&&entry.thumbnail,"",entry&&entry.title)}<span class="badge src">${h(prov.label||kind)}</span>${resumeBadge}</div>
+        <div class="meta"><div class="t">${h(entry&&entry.title)}</div>${sub}</div>
       </div>`;
   }
 
@@ -1817,6 +2213,9 @@
     if(kind==="cosplay") return renderCosplay(id);
     if(kind==="doujin")  return renderDoujin(id);
     if(kind==="anime")   return renderAnimeSeries(id, data);
+    if(kind==="lmanime") return renderAnimeSeries(id, data, "lmanime");
+    if(kind==="movie")   return renderMovie(id, data);
+    if(kind==="nekopoi") return renderNekopoi(id, data);
     if(kind==="donghua") return renderDonghuaSeries(id, data);
     return renderReadableSeries(kind, id, data, 1);
   }
@@ -1833,6 +2232,18 @@
       return { id, data };
     } catch(e){
       if(!isStaleId(e)) throw e;                       // only heal stale ids (Req 7.3)
+      // 1) Precise heal: re-sign the exact same content URL into a fresh id.
+      const rid = await resolveById(id);
+      if(rid){
+        try {
+          const data = await fetchDetail(kind, rid);
+          pstore.updateFavoriteId(id, rid);
+          await pstore.updateHistoryId(id, rid);
+          try { history.replaceState(null, "", pstore.entryRoute(kind, rid)); } catch(_){}
+          return { id: rid, data };
+        } catch(_){ /* fall through to title search */ }
+      }
+      // 2) Fuzzy heal: re-resolve by title across the provider.
       const hit = await searchTitle(kind, meta && meta.title);
       if(hit && hit.id){
         pstore.updateFavoriteId(id, hit.id);           // sync rewrite (Req 7.4)
@@ -1847,15 +2258,38 @@
   }
 
   // savedMetaFor(id): look up stored RichMetadata for an opaque id across
-  // favorites (sync) then browsing history (async). Returns null for a
-  // non-saved id, so ordinary navigation never enters the self-heal path.
+  // favorites (sync) then browsing history (async). Matches on the stable
+  // content key, so a saved item is found even when the route's id is a
+  // rotated/stale issuance of the same content. Returns null for a non-saved
+  // id, so ordinary navigation never enters the self-heal path.
   async function savedMetaFor(id){
     if(id == null) return null;
-    const fav = pstore.listFavorites().find(e=> e && e.opaqueId === id);
+    const k = pstore.stableKey(id);
+    const fav = pstore.listFavorites().find(e=> e && (e.key || pstore.stableKey(e.opaqueId)) === k);
     if(fav) return fav;
     try {
       const hist = await pstore.listHistory();
-      return hist.find(e=> e && e.opaqueId === id) || null;
+      return hist.find(e=> e && (e.key || pstore.stableKey(e.opaqueId)) === k) || null;
+    } catch(_){ return null; }
+  }
+
+  // resolveById(id): re-mint a fresh, valid opaque id for the SAME content by
+  // re-signing its (secret-independent) source+url payload server-side. Used to
+  // heal a saved id that no longer verifies (e.g. the signing secret changed).
+  // Returns the new id, or null if the id isn't a re-signable provider token.
+  async function resolveById(id){
+    const s = String(id || "");
+    const dot = s.indexOf(".");
+    if(dot < 3) return null;
+    const source = s.slice(0, 2);
+    const kind = s.charAt(2);
+    let payload = s.slice(dot + 1);
+    const dot2 = payload.indexOf(".");
+    if(dot2 !== -1) payload = payload.slice(0, dot2);
+    if(!payload) return null;
+    try {
+      const r = await api(`/resolve?${qs({ source, kind, u: payload })}`);
+      return (r && r.id) || null;
     } catch(_){ return null; }
   }
 
@@ -1865,10 +2299,11 @@
 
     // Cache-first: if a hover/touch prefetch already warmed this detail, render
     // it synchronously with no spinner so the page appears instantly.
-    if(kind==="anime"){
-      const cached = peek(`/anime/${encodeURIComponent(id)}`);
-      if(cached){ shell(`<div id="d"></div>`); return renderAnimeSeries(id, cached); }
-    } else if(kind!=="cosplay" && kind!=="doujin"){
+    if(kind==="anime" || kind==="lmanime"){
+      const cfg = ANIME_LIKE[kind];
+      const cached = peek(`/${cfg.api}/${encodeURIComponent(id)}`);
+      if(cached){ shell(`<div id="d"></div>`); return renderAnimeSeries(id, cached, kind); }
+    } else if(kind!=="cosplay" && kind!=="doujin" && kind!=="movie"){
       const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
       const cached = peek(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`);
       if(cached){
@@ -1876,8 +2311,12 @@
         return kind==="donghua" ? renderDonghuaSeries(id, cached) : renderReadableSeries(kind, id, cached, 1);
       }
     } else {
-      const cached = peek(kind==="cosplay" ? `/cosplay/${encodeURIComponent(id)}` : `/nhentai/${encodeURIComponent(id)}`);
-      if(cached){ shell(`<div id="d"></div>`); return kind==="cosplay" ? renderCosplay(id) : renderDoujin(id); }
+      const path = kind==="cosplay" ? `/cosplay/${encodeURIComponent(id)}`
+        : kind==="movie" ? `/movie/${encodeURIComponent(id)}`
+        : kind==="nekopoi" ? `/nekopoi/${encodeURIComponent(id)}`
+        : `/nhentai/${encodeURIComponent(id)}`;
+      const cached = peek(path);
+      if(cached){ shell(`<div id="d"></div>`); return kind==="cosplay" ? renderCosplay(id) : kind==="movie" ? renderMovie(id, cached) : kind==="nekopoi" ? renderNekopoi(id, cached) : renderDoujin(id); }
     }
 
     shell(`<div id="d">${spinner}</div>`);
@@ -1900,7 +2339,9 @@
     try{
       if(kind==="cosplay") return renderCosplay(id);
       if(kind==="doujin") return renderDoujin(id);
-      if(kind==="anime"){ const data = await apiCached(`/anime/${encodeURIComponent(id)}`); return renderAnimeSeries(id, data); }
+      if(kind==="movie"){ const data = await apiCached(`/movie/${encodeURIComponent(id)}`); return renderMovie(id, data); }
+      if(kind==="nekopoi"){ const data = await apiCached(`/nekopoi/${encodeURIComponent(id)}`); return renderNekopoi(id, data); }
+      if(kind==="anime" || kind==="lmanime"){ const cfg = ANIME_LIKE[kind]; const data = await apiCached(`/${cfg.api}/${encodeURIComponent(id)}`); return renderAnimeSeries(id, data, kind); }
       const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
       const data = await apiCached(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`);
       if(kind==="donghua") return renderDonghuaSeries(id, data);
@@ -1908,7 +2349,9 @@
     }catch(e){ setD(`<div class="errbox">${h(e.message)}</div>`); }
   }
 
-  function renderAnimeSeries(id, data){
+  function renderAnimeSeries(id, data, kind){
+    kind = kind || "anime";
+    const cfg = ANIME_LIKE[kind] || ANIME_LIKE.anime;
     const eps = data.episodes||[];
     const facts = [
       data.status?`<span class="pill ok">${h(data.status)}</span>`:"",
@@ -1918,17 +2361,17 @@
       data.duration?`<span class="pill">${h(data.duration)}</span>`:"",
       data.studio?`<span class="pill">${h(data.studio)}</span>`:"",
       data.release_date?`<span class="pill">${h(data.release_date)}</span>`:"",
-      ...(data.genres||[]).slice(0,6).map(g=>`<span class="pill">${h(g)}</span>`),
+      ...(data.genres||[]).slice(0,6).map(g=>genrePill(kind, g)),
     ].join("");
     const first = eps[0];
     const last = eps[eps.length-1];
     const actions = [
-      first?`<a class="btn primary" href="#/watchanime/${encodeURIComponent(first.id)}">${I.play} Watch Ep ${first.number??1}</a>`:"",
-      (last && last!==first)?`<a class="btn" href="#/watchanime/${encodeURIComponent(last.id)}">Latest ep ${last.number??""}</a>`:"",
-      ...(data.batch||[]).slice(0,1).map(b=>`<a class="btn sm" href="#/watchanime/${encodeURIComponent(b.id)}">${I.book} Batch</a>`),
+      first?`<a class="btn primary" href="#/${cfg.watch}/${encodeURIComponent(first.id)}">${I.play} Watch Ep ${first.number??1}</a>`:"",
+      (last && last!==first)?`<a class="btn" href="#/${cfg.watch}/${encodeURIComponent(last.id)}">Latest ep ${last.number??""}</a>`:"",
+      ...(data.batch||[]).slice(0,1).map(b=>`<a class="btn sm" href="#/${cfg.watch}/${encodeURIComponent(b.id)}">${I.book} Batch</a>`),
     ].join("");
     const syn = data.synopsis || (data.japanese_title?`Japanese title: ${data.japanese_title}`:"");
-    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind: "anime", timestamp: Date.now() };
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind, timestamp: Date.now() };
     // Record this open into browsing history (fire-and-forget; never blocks or
     // throws into the render path). Reuses the same RichMetadata shape as the
     // favorite control (Req 3.4, 3.7, 3.8).
@@ -1937,11 +2380,11 @@
       ? `<div class="ep-tools"><input id="epSearch" type="search" inputmode="numeric" placeholder="Jump to episode..." autocomplete="off"></div>`
       : "";
     const epGrid = eps.length
-      ? `<div class="ep-list" id="epList">${eps.map(e=>`<button class="ep-btn center" data-ep="${e.number??""}" data-go="#/watchanime/${encodeURIComponent(e.id)}">Ep ${e.number??(e.title||"?")}</button>`).join("")}</div>`
+      ? `<div class="ep-list" id="epList">${eps.map(e=>`<button class="ep-btn center" data-ep="${e.number??""}" data-go="#/${cfg.watch}/${encodeURIComponent(e.id)}">Ep ${e.number??(e.title||"?")}</button>`).join("")}</div>`
       : `<div class="empty">No episodes available.</div>`;
 
     setD(
-      heroHtml("anime","Anime",data,facts,actions+favButton(favMeta),syn,data.cover)+
+      heroHtml(kind,cfg.label,data,facts,actions+favButton(favMeta),syn,data.cover)+
       `<div class="row-head"><h2><span class="dot"></span>Episode <span class="cnt-badge">${eps.length}</span></h2></div>${epControls}${epGrid}`
     );
     const epSearch = document.getElementById("epSearch");
@@ -1954,8 +2397,173 @@
         });
       });
     }
-    if(first) prefetch(`/anime/episode/${encodeURIComponent(first.id)}`);
-    renderRecommendations("anime", id);
+    if(first) prefetch(`/${cfg.api}/episode/${encodeURIComponent(first.id)}`);
+    renderRecommendations(kind, id);
+  }
+
+  // Movie/film detail (single embed player) — LayarKaca21.
+  function renderMovie(id, data){
+    const slug = (l)=>String(l||"").trim().toLowerCase().replace(/&/g,"and").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+    const genrePillM = (g)=>`<a class="pill link" href="#/browse/movie/${encodeURIComponent(slug(g))}">${h(g)}</a>`;
+    const countryPill = (c)=>`<a class="pill link" href="#/browse/movie/${encodeURIComponent("country:"+slug(c))}">${h(c)}</a>`;
+    const facts = [
+      data.year?`<span class="pill">${h(data.year)}</span>`:"",
+      data.rating?`<span class="pill">&#9733; ${h(data.rating)}</span>`:"",
+      data.quality?`<span class="pill ok">${h(data.quality)}</span>`:"",
+      data.duration?`<span class="pill">${h(data.duration)}</span>`:"",
+      ...(data.countries||[]).slice(0,2).map(countryPill),
+      ...(data.genres||[]).slice(0,6).map(genrePillM),
+    ].join("");
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.poster, kind: "movie", timestamp: Date.now() };
+    void pstore.recordHistory(favMeta);
+
+    const dlBtn = data.download_url
+      ? `<a class="btn" target="_blank" rel="noopener noreferrer" href="${h(data.download_url)}">${I.book} Download</a>`
+      : "";
+    const actions = dlBtn + favButton(favMeta);
+
+    const credits = [
+      (data.directors||[]).length ? `<p class="movie-credit"><span>Director:</span> ${data.directors.map(h).join(", ")}</p>` : "",
+      (data.cast||[]).length ? `<p class="movie-credit"><span>Cast:</span> ${data.cast.slice(0,8).map(h).join(", ")}</p>` : "",
+      data.release_date ? `<p class="movie-credit"><span>Release:</span> ${h(data.release_date)}</p>` : "",
+    ].join("");
+
+    // lk21 exposes several player servers ("GANTI PLAYER": P2P / TURBOVIP /
+    // CAST / HYDRAX). P2P resolves (server-side) to a proxied HLS master we play
+    // inline with hls.js; the others are their own embeddable players we unwrap
+    // to an inner iframe. The client only sends a server name to
+    // /api/v1/movie-stream/{id}?server=… and renders whatever it gets back.
+    const sid = encodeURIComponent(data.id||id);
+    const servers = Array.isArray(data.servers) ? data.servers : [];
+    const hasPlayer = servers.length || data.embed_url;
+    const serverBtns = servers.length
+      ? `<div class="server-switch"><span class="ss-label">${I.play} Server</span>`+
+        servers.map((s,i)=>`<button class="ss-btn${i===0?" active":""}" data-server="${escAttr(s.name)}">${h(s.label)}</button>`).join("")+
+        `</div>`
+      : "";
+    const playerBlock = hasPlayer
+      ? serverBtns + `<div id="movie-player" class="movie-player">${spinner}</div>`
+      : `<div class="server-note">No playable source found for this title.${data.download_url?" Use <b>Download</b> for an offline copy.":""}</div>`;
+
+    // MOVIE TERKAIT — related suggestions rendered as standard movie cards.
+    const related = (data.related||[]).map(r=>({
+      id:r.id, title:r.title, thumbnail:r.poster, kind:"movie", source:"lk21",
+      tags: r.year?[String(r.year)]:[],
+    }));
+    const relatedBlock = related.length
+      ? `<div class="row-head"><h2><span class="dot"></span>Related Movies</h2></div>`+grid(related)
+      : "";
+
+    setD(
+      heroHtml("movie","Movies",{title:data.title},facts,actions,data.synopsis,data.poster)+
+      (credits?`<div class="movie-credits">${credits}</div>`:"")+
+      `<div class="row-head"><h2><span class="dot"></span>Watch</h2></div>`+
+      playerBlock+
+      relatedBlock
+    );
+
+    if(hasPlayer){
+      const dlNote = data.download_url
+        ? ` <a class="btn sm" target="_blank" rel="noopener noreferrer" href="${escAttr(data.download_url)}">${I.book} Download</a>`
+        : "";
+      const loadServer = async (name, btn)=>{
+        const host = document.getElementById("movie-player");
+        if(!host) return;
+        document.querySelectorAll(".ss-btn").forEach(b=>b.classList.toggle("active", b===btn));
+        host.innerHTML = spinner;
+        try{
+          const q = name ? `?server=${encodeURIComponent(name)}` : "";
+          const res = await api(`/movie-stream/${sid}${q}`);
+          if(res && res.type==="hls" && res.url){
+            host.innerHTML = `<div class="video-wrap hls">
+                <video id="hls-m" controls preload="metadata" playsinline webkit-playsinline></video>
+                <div class="hls-state" id="hls-state-m">${spinner}</div>
+              </div>`;
+            // We already resolved the master URL; attach it directly.
+            attachHlsSrc(host.querySelector("video"), "m", res.url);
+          } else if(res && res.type==="iframe" && res.url){
+            host.innerHTML = `<div class="embed-frame">
+                <iframe src="${escAttr(res.url)}" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="origin"></iframe>
+              </div>
+              <div class="embed-help">Some servers only allow playback on their own site. If the video shows an "embedding blocked" message, <a href="${escAttr(res.url)}" target="_blank" rel="noopener noreferrer">open it in a new tab ${I.arrow}</a>. The <b>P2P</b> server always plays directly here.${dlNote}</div>`;
+          } else {
+            host.innerHTML = `<div class="hls-err">No playable source on this server.${dlNote}</div>`;
+          }
+        }catch(e){
+          host.innerHTML = `<div class="hls-err">Failed to load this server. Try another.${dlNote}</div>`;
+        }
+      };
+      document.querySelectorAll(".ss-btn").forEach(btn=>{
+        btn.addEventListener("click", ()=>loadServer(btn.dataset.server, btn));
+      });
+      const first = document.querySelector(".ss-btn");
+      loadServer(first ? first.dataset.server : "", first);
+    }
+    renderRecommendations("movie", id);
+  }
+
+  // NekoPoi adult-anime post: streaming server switcher (directly embeddable
+  // players) + download groups + related posts. 18+ content.
+  function renderNekopoi(id, data){
+    const sid = encodeURIComponent(data.id||id);
+    const facts = [
+      data.date?`<span class="pill">${h(data.date)}</span>`:"",
+      ...(data.genres||[]).slice(0,8).map(g=>`<a class="pill link" href="#/search/${encodeURIComponent(g)}/nekopoi">${h(g)}</a>`),
+    ].join("");
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind: "nekopoi", timestamp: Date.now() };
+    void pstore.recordHistory(favMeta);
+    const actions = favButton(favMeta);
+
+    const servers = Array.isArray(data.servers) ? data.servers : [];
+    const initial = servers[0] ? servers[0].embed_url : "";
+    const playerBlock = servers.length
+      ? `<div class="server-switch">${servers.map((s,i)=>`<button class="ss-btn${i===0?" active":""}" data-embed="${escAttr(s.embed_url)}">${h(s.label||("Server "+(i+1)))}</button>`).join("")}</div>`+
+        `<div id="neko-player" class="movie-player"><div class="embed-frame"><iframe id="neko-frame" src="${escAttr(initial)}" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="origin"></iframe></div></div>`+
+        `<div class="embed-help">If a server shows an "embedding blocked" message, <a id="neko-open" href="${escAttr(initial)}" target="_blank" rel="noopener noreferrer">open it in a new tab ${I.arrow}</a> or switch servers above.</div>`
+      : `<div class="server-note">No streaming server found.</div>`;
+
+    // Download groups -> quality + mirror buttons.
+    const dlBlock = (data.downloads||[]).length
+      ? `<div class="row-head"><h2><span class="dot"></span>Download</h2></div>`+
+        (data.downloads||[]).map(g=>`<div class="dl-group"><div class="q">${h(g.quality)}</div><div class="mirrors">${(g.mirrors||[]).map(m=>`<a class="btn sm" target="_blank" rel="noopener noreferrer" href="${h(m.url)}">${h(m.name)}</a>`).join("")}</div></div>`).join("")
+      : "";
+
+    const related = (data.related||[]).map(r=>({
+      id:r.id, title:r.title, thumbnail:r.poster, kind:"nekopoi", source:"nekopoi", tags:[],
+    }));
+    const relatedBlock = related.length
+      ? `<div class="row-head"><h2><span class="dot"></span>Related</h2></div>`+grid(related)
+      : "";
+
+    // Series page: an episode list (each opens its own video post).
+    const episodes = (data.episodes||[]).map(e=>({
+      id:e.id, title:e.title, thumbnail:e.poster, kind:"nekopoi", source:"nekopoi", tags:[],
+    }));
+    const episodesBlock = episodes.length
+      ? `<div class="row-head"><h2><span class="dot"></span>Episodes <span class="cnt-badge">${episodes.length}</span></h2></div>`+grid(episodes)
+      : "";
+
+    // Watch section only when this post actually carries players. Series pages
+    // (episode lists) skip it and lead with the episode grid instead.
+    const watchBlock = servers.length
+      ? `<div class="row-head"><h2><span class="dot"></span>Watch</h2></div>`+playerBlock+dlBlock
+      : (data.downloads||[]).length ? dlBlock : "";
+
+    setD(
+      heroHtml("nekopoi","Hentai",{title:data.title},facts,actions,data.synopsis,data.cover)+
+      watchBlock+episodesBlock+relatedBlock
+    );
+
+    // Server switcher: swap the iframe src directly (these players embed).
+    document.querySelectorAll(".server-switch .ss-btn").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        document.querySelectorAll(".server-switch .ss-btn").forEach(b=>b.classList.toggle("active", b===btn));
+        const frame = document.getElementById("neko-frame");
+        const open = document.getElementById("neko-open");
+        if(frame) frame.src = btn.dataset.embed;
+        if(open) open.href = btn.dataset.embed;
+      });
+    });
   }
 
   // Render a "Rekomendasi" row at the bottom of a detail page, sourced from
@@ -1982,7 +2590,7 @@
     const facts = [
       data.status?`<span class="pill ok">${h(data.status)}</span>`:"",
       `<span class="pill">${data.episode_count} episodes</span>`,
-      ...(data.genres||[]).slice(0,5).map(g=>`<span class="pill">${h(g)}</span>`),
+      ...(data.genres||[]).slice(0,5).map(g=>genrePill("donghua", g)),
     ].join("");
     const first = eps[0];
     const last = eps[eps.length-1];
@@ -2071,7 +2679,7 @@
       data.author?`<span class="pill">&#9997; ${h(data.author)}</span>`:"",
       data.rating?`<span class="pill">&#9733; ${h(data.rating)}</span>`:"",
       `<span class="pill">${data.chapter_count} chapters</span>`,
-      ...(data.genres||[]).slice(0,5).map(g=>`<span class="pill">${h(g)}</span>`),
+      ...(data.genres||[]).slice(0,5).map(g=>genrePill(kind, g)),
     ].join("");
     const readPath = kind==="manga"?"read/manga":"read/novel";
 
@@ -2244,15 +2852,26 @@
     // Photos: natural aspect ratio masonry (not forced 2:3).
     const imgs = (data.images||[]).map(u=>`<a href="${h(u)}" target="_blank" rel="noopener">${imgNatural(u,"")}</a>`).join("");
 
+    // "Suggestions for you" — related posts scraped from the bottom of the
+    // gallery page (already opaque-encoded + image-proxied by the API). These
+    // are post-specific, so prefer them over the generic popular-feed row.
+    const recs = (data.recommendations||[]).filter(it=>providerVisible(it.kind));
+    const suggBlock = recs.length
+      ? `<div class="row-head"><h2><span class="dot"></span>Suggestions for you</h2></div>${grid(recs)}`
+      : "";
+
     setD(
       heroHtml("cosplay","Cosplay",data,facts,actions+favButton(favMeta),null,data.cover)+
       videoBlock+
       `<div class="row-head"><h2><span class="dot"></span>${(data.images||[]).length} Photos</h2></div>`+
-      `<div class="gallery">${imgs||`<div class="empty">No photos.</div>`}</div>`
+      `<div class="gallery">${imgs||`<div class="empty">No photos.</div>`}</div>`+
+      suggBlock
     );
     // Resolve + attach HLS players
     document.querySelectorAll(".video-wrap.hls").forEach(el => attachHls(el));
-    renderRecommendations("cosplay", id);
+    // Fall back to the generic popular-feed recommendations only when the post
+    // page itself didn't surface any suggestions.
+    if(!recs.length) renderRecommendations("cosplay", id);
   }
 
   async function renderDoujin(id){
@@ -2303,7 +2922,7 @@
       // Browsing-history record. Point at the SERIES detail (series_id) so the
       // Library entry opens the series page, falling back to the episode id
       // when the series is unknown. Renders from metadata alone (Req 3.3, 3.8).
-      void pstore.recordHistory({ opaqueId: e.series_id||id, title: e.series_title, kind: "donghua", timestamp: Date.now() });
+      void pstore.recordHistory({ opaqueId: e.series_id||id, title: e.series_title, kind: "donghua", thumbnail: e.thumbnail||e.cover||e.poster||null, progress: { type: "episode", number: e.episode_number, id, label: (e.episode_number!=null?("Ep "+e.episode_number):(e.title||null)) }, timestamp: Date.now() });
       const servers = e.servers||[];
       const seriesLink = e.series_id?`#/detail/donghua/${encodeURIComponent(e.series_id)}`:"#/";
       const player = servers.length?`<div class="player-wrap"><div class="frame"><iframe id="player" src="${h(servers[0].embed_url)}" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture"></iframe></div></div>`:`<div class="empty">No video servers available.</div>`;
@@ -2325,18 +2944,28 @@
       if(e.next_id) prefetch(`/donghua/episode/${encodeURIComponent(e.next_id)}`);
       if(e.prev_id) prefetch(`/donghua/episode/${encodeURIComponent(e.prev_id)}`);
       renderRecommendations("donghua", e.series_id);
-    }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
+    }catch(err){
+      // Stale leaf id (e.g. after a signing-secret change): re-mint it and retry
+      // so resuming from History still lands on the episode.
+      if(isStaleId(err)){
+        const fresh = await resolveById(id);
+        if(fresh && fresh!==id){ try{ history.replaceState(null,"",`#/watch/${encodeURIComponent(fresh)}`);}catch(_){} return routeWatch(fresh); }
+      }
+      setView(`<div class="errbox">${h(err.message)}</div>`);
+    }
   }
 
-  async function routeWatchAnime(id){
-    const warmed = peek(`/anime/episode/${encodeURIComponent(id)}`);
+  async function routeWatchAnime(id, kind){
+    kind = kind || "anime";
+    const cfg = ANIME_LIKE[kind] || ANIME_LIKE.anime;
+    const warmed = peek(`/${cfg.api}/episode/${encodeURIComponent(id)}`);
     shell(`<div id="d">${warmed?"":spinner}</div>`);
     try{
-      const e = await apiCached(`/anime/episode/${encodeURIComponent(id)}`);
+      const e = await apiCached(`/${cfg.api}/episode/${encodeURIComponent(id)}`);
       // Browsing-history record pointing at the series detail (Req 3.4, 3.8).
-      void pstore.recordHistory({ opaqueId: e.series_id||id, title: e.series_title, kind: "anime", timestamp: Date.now() });
+      void pstore.recordHistory({ opaqueId: e.series_id||id, title: e.series_title, kind, thumbnail: e.thumbnail||e.cover||e.poster||null, progress: { type: "episode", number: e.episode_number, id, label: (e.episode_number!=null?("Ep "+e.episode_number):(e.title||null)) }, timestamp: Date.now() });
       const mirrors = e.mirrors||[];
-      const seriesLink = e.series_id?`#/detail/anime/${encodeURIComponent(e.series_id)}`:"#/";
+      const seriesLink = e.series_id?`#/detail/${kind}/${encodeURIComponent(e.series_id)}`:"#/";
       const epLabel = e.episode_number!=null ? `Episode ${e.episode_number}` : "Episode";
       // Initial player = default embed if present, else nothing (resolved on click).
       const initial = e.default_embed || "";
@@ -2345,17 +2974,17 @@
       const byQ = {};
       mirrors.forEach(m=>{ (byQ[m.quality]=byQ[m.quality]||[]).push(m); });
       const serverBars = Object.entries(byQ).map(([q, list])=>
-        `<div class="server-bar"><span class="lbl">${h(q)}:</span>${list.map(m=>`<button class="srv" data-stream="${h(m.stream_id)}">${h(m.name)}</button>`).join("")}</div>`
+        `<div class="server-bar"><span class="lbl">${h(q||"Servers")}:</span>${list.map(m=>`<button class="srv" data-stream="${h(m.stream_id)}">${h(m.name)}</button>`).join("")}</div>`
       ).join("");
       const dls = (e.downloads||[]).map(g=>`<div class="dl-group"><div class="q">${h(g.quality)}${g.size?` &middot; ${h(g.size)}`:""}</div><div class="mirrors">${(g.mirrors||[]).map(m=>`<a class="btn sm" target="_blank" rel="noopener noreferrer" href="${h(m.url)}">${h(m.name)}</a>`).join("")}</div></div>`).join("");
       const nav = `<div class="server-bar" style="margin-top:8px">
-        ${e.prev_id?`<a class="btn sm" href="#/watchanime/${encodeURIComponent(e.prev_id)}">&larr; Previous ep</a>`:""}
+        ${e.prev_id?`<a class="btn sm" href="#/${cfg.watch}/${encodeURIComponent(e.prev_id)}">&larr; Previous ep</a>`:""}
         <a class="btn sm" href="${seriesLink}">&#9776; All episodes</a>
-        ${e.next_id?`<a class="btn sm" href="#/watchanime/${encodeURIComponent(e.next_id)}">Next ep &rarr;</a>`:""}</div>`;
+        ${e.next_id?`<a class="btn sm" href="#/${cfg.watch}/${encodeURIComponent(e.next_id)}">Next ep &rarr;</a>`:""}</div>`;
       setView(
         `<div id="d">`+
-        crumbs([{href:"#/",label:"Home"},{href:"#/browse/anime",label:"Anime"},{label:`${e.series_title||"Anime"} - ${epLabel}`}])+
-        `<div class="row-head"><h2><span class="dot"></span>${h(e.series_title||"Anime")} - ${epLabel}</h2></div>`+
+        crumbs([{href:"#/",label:"Home"},{href:`#/browse/${cfg.browse}`,label:cfg.label},{label:`${e.series_title||cfg.label} - ${epLabel}`}])+
+        `<div class="row-head"><h2><span class="dot"></span>${h(e.series_title||cfg.label)} - ${epLabel}</h2></div>`+
         player+
         `<div class="server-note">Streaming servers are third-party. If one fails, try another.</div>`+
         serverBars+nav+(dls?`<div class="row-head"><h2><span class="dot"></span>Downloads</h2></div>${dls}`:"")+
@@ -2369,17 +2998,23 @@
           const frame = document.querySelector(".player-wrap .frame");
           frame.innerHTML = `<div class="empty">${spinner}</div>`;
           try{
-            const r = await api(`/anime-stream?${qs({id: btn.dataset.stream})}`);
+            const r = await api(`/${cfg.stream}?${qs({id: btn.dataset.stream})}`);
             frame.innerHTML = `<iframe id="player" src="${h(r.url)}" allowfullscreen allow="autoplay; encrypted-media; fullscreen; picture-in-picture"></iframe>`;
           }catch(err){
             frame.innerHTML = `<div class="empty">Failed to load server. Try another one.</div>`;
           }
         };
       });
-      if(e.next_id) prefetch(`/anime/episode/${encodeURIComponent(e.next_id)}`);
-      if(e.prev_id) prefetch(`/anime/episode/${encodeURIComponent(e.prev_id)}`);
-      renderRecommendations("anime", e.series_id);
-    }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
+      if(e.next_id) prefetch(`/${cfg.api}/episode/${encodeURIComponent(e.next_id)}`);
+      if(e.prev_id) prefetch(`/${cfg.api}/episode/${encodeURIComponent(e.prev_id)}`);
+      renderRecommendations(kind, e.series_id);
+    }catch(err){
+      if(isStaleId(err)){
+        const fresh = await resolveById(id);
+        if(fresh && fresh!==id){ try{ history.replaceState(null,"",`#/${cfg.watch}/${encodeURIComponent(fresh)}`);}catch(_){} return routeWatchAnime(fresh, kind); }
+      }
+      setView(`<div class="errbox">${h(err.message)}</div>`);
+    }
   }
 
   async function routeRead(kind, id){
@@ -2420,7 +3055,7 @@
       // Library entry opens the series page, falling back to the chapter id.
       // Map the reader kind onto the detail kind (nhentai -> doujin) so the
       // recorded entry's kind matches its detail route (Req 3.1, 3.6, 3.8).
-      void pstore.recordHistory({ opaqueId: c.series_id||id, title: c.series_title, kind: kind==="nhentai"?"doujin":"manga", timestamp: Date.now() });
+      void pstore.recordHistory({ opaqueId: c.series_id||id, title: c.series_title, kind: kind==="nhentai"?"doujin":"manga", thumbnail: c.thumbnail||c.cover||(c.pages&&c.pages[0]&&c.pages[0].url)||null, progress: { type: "chapter", number: c.chapter_number, id, label: (c.chapter_number!=null?("Ch. "+c.chapter_number):(c.chapter_title||null)) }, timestamp: Date.now() });
       // If no reading context, fall back to generic next_id (nhentai/single-lang)
       if(!currentNextId) currentNextId = c.next_id || null;
       const pages = c.pages||[];
@@ -2510,14 +3145,20 @@
         }, { rootMargin: "1500px" });
         obs.observe(sentinel);
       }
-    }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
+    }catch(err){
+      if(isStaleId(err)){
+        const fresh = await resolveById(id);
+        if(fresh && fresh!==id){ try{ history.replaceState(null,"",`#/read/${kind}/${encodeURIComponent(fresh)}`);}catch(_){} return routeRead(kind, fresh); }
+      }
+      setView(`<div class="errbox">${h(err.message)}</div>`);
+    }
   }
 
   async function renderNovelChapter(id){
     try{
     const c = await apiCached(`/novel/chapter/${encodeURIComponent(id)}`);
     // Browsing-history record pointing at the novel series detail (Req 3.2, 3.8).
-    void pstore.recordHistory({ opaqueId: c.series_id||id, title: c.series_title, kind: "novel", timestamp: Date.now() });
+    void pstore.recordHistory({ opaqueId: c.series_id||id, title: c.series_title, kind: "novel", thumbnail: c.thumbnail||c.cover||null, progress: { type: "chapter", number: c.chapter_number, id, label: (c.chapter_number!=null?("Ch. "+c.chapter_number):(c.chapter_title||null)) }, timestamp: Date.now() });
     const paras = (c.body||"").split(/\n{2,}/).map(s=>s.trim()).filter(Boolean).map(p=>`<p>${h(p)}</p>`).join("");
     const nav = `<div class="reader-nav">
       ${c.prev_id?`<a class="btn sm" href="#/read/novel/${encodeURIComponent(c.prev_id)}">&larr; Previous</a>`:""}
@@ -2527,14 +3168,20 @@
       (c.chapter_title?`<p style="color:var(--muted);margin-top:-8px">${h(c.chapter_title)}</p>`:"")+
       `<div class="novel-body">${paras||"<p>(empty)</p>"}</div>`+nav);
     if(c.next_id) prefetch(`/novel/chapter/${encodeURIComponent(c.next_id)}`);
-    }catch(e){ setView(`<div class="errbox">${h(e.message)}</div>`); }
+    }catch(err){
+      if(isStaleId(err)){
+        const fresh = await resolveById(id);
+        if(fresh && fresh!==id){ try{ history.replaceState(null,"",`#/read/novel/${encodeURIComponent(fresh)}`);}catch(_){} return renderNovelChapter(fresh); }
+      }
+      setView(`<div class="errbox">${h(err.message)}</div>`);
+    }
   }
 
   // route dispatch is defined in part 2 (appended)
   window.__apiku = { shell, setView, viewEl, h, qs, api, apiRaw, apiCached, prefetch, spinner, go, I,
     LITE, setLite, pstore,
     isStaleId, searchTitle, resolveSaved, fetchDetail,
-    routeHome, routeBrowse, routeSearch, routeXref, routeDetail, routeWatch, routeWatchAnime, routeRead, routeLibrary };
+    routeHome, routeBrowse, routeSearch, routeXref, routeSchedule, routeDetail, routeWatch, routeWatchAnime, routeRead, routeLibrary };
 })();
 
 // ===========================================================================
@@ -2544,7 +3191,7 @@
   "use strict";
   const A = window.__apiku;
   const { shell, setView, h, apiRaw, I, go,
-    routeHome, routeBrowse, routeSearch, routeXref, routeDetail, routeWatch, routeWatchAnime, routeRead, routeLibrary } = A;
+    routeHome, routeBrowse, routeSearch, routeXref, routeSchedule, routeDetail, routeWatch, routeWatchAnime, routeRead, routeLibrary } = A;
 
   // ---- API Docs -----------------------------------------------------------
   const ENDPOINTS = [
@@ -2967,10 +3614,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
       case "browse":   return routeBrowse(parts[1], parts[2], parts[3]);
       case "search":   return routeSearch(parts[1]||"", parts[2], parts[3]);
       case "xref":     return routeXref(parts[1], parts[2]);
+      case "schedule": return routeSchedule();
       case "library":  return routeLibrary(parts[1]);
       case "detail":   return routeDetail(parts[1], parts[2]);
       case "watch":    return routeWatch(parts[1]);
       case "watchanime": return routeWatchAnime(parts[1]);
+      case "watchlm":  return routeWatchAnime(parts[1], "lmanime");
       case "read":     return routeRead(parts[1], parts[2]);
       case "docs":     return routeDocs();
       case "explorer": return routeExplorer();

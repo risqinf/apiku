@@ -11,7 +11,7 @@
 
 use crate::adapters::SiteAdapter;
 use crate::error::Result;
-use crate::models::{ContentModel, CosplayPost, DownloadMirror};
+use crate::models::{ContentModel, CosplayPost, CosplayRecommendation, DownloadMirror};
 use crate::parser::{resolve_url, HtmlParser};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -32,26 +32,20 @@ impl CosplayteleAdapter {
 
     /// Build a browse URL for Cosplaytele.
     /// `feed` values:
-    ///   "home" / "latest" / ""  -> homepage (latest posts)
-    ///   "popular"               -> /category/popular-cosplay/ widget feed
-    ///   any other category slug -> /category/<slug>/
+    ///   "home" / "latest" / "popular" / ""  -> homepage (latest posts)
+    ///   any other category slug             -> /category/<slug>/
+    ///
+    /// Note: Cosplaytele has no reliable "popular" archive (the old `/tag/hot/`
+    /// page was unstable), so `popular`/`hot`/`trending` now fall back to the
+    /// homepage's latest feed.
     pub fn browse_url(feed: &str, page: u32) -> String {
         let p = page.max(1);
         match feed {
-            "" | "home" | "latest" | "recent" => {
+            "" | "home" | "latest" | "recent" | "popular" | "hot" | "trending" => {
                 if p == 1 {
                     "https://cosplaytele.com/".to_string()
                 } else {
                     format!("https://cosplaytele.com/page/{}/", p)
-                }
-            }
-            // For now route every other feed (popular, hot, etc.) to the
-            // hot tag — Cosplaytele uses the same template.
-            "popular" | "hot" | "trending" => {
-                if p == 1 {
-                    "https://cosplaytele.com/tag/hot/".to_string()
-                } else {
-                    format!("https://cosplaytele.com/tag/hot/page/{}/", p)
                 }
             }
             slug => {
@@ -222,6 +216,10 @@ impl CosplayteleAdapter {
         // Unzip password (if shown in post)
         let unzip_password = extract_unzip_password(html);
 
+        // "Suggestions for you:" — the Contextual Related Posts list cosplaytele
+        // renders below the gallery (separate from the post's own photos).
+        let recommendations = extract_recommendations(&parser, url);
+
         CosplayPost {
             title: if title.is_empty() { None } else { Some(title) },
             cosplayer,
@@ -238,6 +236,7 @@ impl CosplayteleAdapter {
             cover_image,
             download_links,
             unzip_password,
+            recommendations,
             url: url.to_string(),
         }
     }
@@ -403,6 +402,124 @@ fn extract_unzip_password(html: &str) -> Option<String> {
         return Some(c[1].to_string());
     }
     None
+}
+
+/// Extract the "Suggestions for you:" related posts cosplaytele renders below
+/// the gallery. These come from the Contextual Related Posts (CRP) plugin
+/// (`.crp_related ul li a.crp_link`), with the full title in the thumbnail's
+/// `title` attribute. Falls back to Flatsome `.box-blog-post` boxes for older
+/// layouts. Returns up to 6 posts, excluding the current one, deduped by URL.
+fn extract_recommendations(parser: &HtmlParser, current_url: &str) -> Vec<CosplayRecommendation> {
+    let mut out: Vec<CosplayRecommendation> = Vec::new();
+    let mut seen = HashSet::new();
+    let current = current_url.trim_end_matches('/');
+
+    // Prefer the CRP "Suggestions for you" list; fall back to related-post boxes.
+    let crp = parser.select_all(".crp_related li");
+    let containers = if crp.is_empty() {
+        parser.select_all(
+            ".box-blog-post, .related-posts .post-item, .related .col, .related-post, .post-item",
+        )
+    } else {
+        crp
+    };
+
+    for el in containers {
+        // The post link: a CRP link, a title anchor, or the first anchor that
+        // points at a real post URL.
+        let anchor = el
+            .select(
+                &scraper::Selector::parse("a.crp_link, h5 a, h4 a, h3 a, .post-title a, a[href]")
+                    .unwrap(),
+            )
+            .find(|a| {
+                a.value()
+                    .attr("href")
+                    .map(|h| CosplayteleAdapter::is_post_url(&resolve_url(current_url, h)))
+                    .unwrap_or(false)
+            });
+        let anchor = match anchor {
+            Some(a) => a,
+            None => continue,
+        };
+
+        let url = match anchor.value().attr("href") {
+            Some(h) => resolve_url(current_url, h),
+            None => continue,
+        };
+        if url.trim_end_matches('/') == current || !seen.insert(url.clone()) {
+            continue;
+        }
+
+        let img = el.select(&scraper::Selector::parse("img").unwrap()).next();
+
+        // Title priority: thumbnail `title` attr (CRP, full & untruncated)
+        // -> `.crp_title` span -> anchor text -> img alt -> anchor `title`.
+        let img_title = img
+            .as_ref()
+            .and_then(|i| i.value().attr("title"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let crp_title = el
+            .select(&scraper::Selector::parse(".crp_title").unwrap())
+            .next()
+            .map(|n| n.text().collect::<Vec<_>>().join("").trim().to_string())
+            .filter(|s| !s.is_empty());
+        let anchor_text = {
+            let t = anchor
+                .text()
+                .collect::<Vec<_>>()
+                .join("")
+                .trim()
+                .to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        };
+        let img_alt = img
+            .as_ref()
+            .and_then(|i| i.value().attr("alt"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let anchor_title = anchor
+            .value()
+            .attr("title")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let title = clean_title(
+            &img_title
+                .or(crp_title)
+                .or(anchor_text)
+                .or(img_alt)
+                .or(anchor_title)
+                .unwrap_or_default(),
+        );
+        if title.is_empty() {
+            continue;
+        }
+
+        let thumbnail = img.and_then(|i| {
+            let v = i.value();
+            v.attr("data-src")
+                .or_else(|| v.attr("data-lazy-src"))
+                .or_else(|| v.attr("src"))
+                .filter(|s| !s.is_empty() && !s.starts_with("data:"))
+                .map(|s| resolve_url(current_url, s))
+        });
+
+        out.push(CosplayRecommendation {
+            title,
+            url,
+            thumbnail,
+        });
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
 }
 
 #[async_trait]

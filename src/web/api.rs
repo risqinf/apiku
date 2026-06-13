@@ -37,8 +37,8 @@ use crate::engine::ScraperEngine;
 use crate::fingerprint::BrowserFingerprint;
 use crate::models::{
     AnimeEpisode, AnimeSeries, ChapterInfo, ContentModel, CosplayPost, DonghuaEpisode,
-    DonghuaSeries, EpisodeInfo, MangaChapter, MangaSeries, NovelChapter, NovelChapterRef,
-    NovelSeries, PageImage, ScrapeResult,
+    DonghuaSeries, EpisodeInfo, MangaChapter, MangaSeries, MovieDetail, NovelChapter,
+    NovelChapterRef, NovelSeries, PageImage, ScrapeResult,
 };
 use crate::opaque::{Kind, OpaqueCodec, OpaqueError, Source};
 use crate::web::search::{
@@ -52,6 +52,7 @@ use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use moka::future::Cache;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -67,6 +68,10 @@ pub struct ApiState {
     pub codec: Arc<OpaqueCodec>,
     pub cache: Cache<String, Arc<ScrapeResult>>,
     pub search_cache: Cache<String, Arc<SearchEnvelopeData>>,
+    /// Cache of proxied image bytes (content-type, body) keyed by upstream URL,
+    /// so re-viewing a feed/detail serves images instantly instead of
+    /// re-fetching each one from the source CDN.
+    pub img_cache: Cache<String, Arc<(String, Vec<u8>)>>,
     pub started_at: Instant,
     pub sysspec: crate::sysspec::SysSpec,
     /// Consumer web app branding / customization.
@@ -88,11 +93,18 @@ impl ApiState {
             .time_to_live(Duration::from_secs(300))
             .max_capacity(sysspec.search_cache_capacity())
             .build();
+        // Image bytes cache: many entries, capped, with a longer TTL since
+        // upstream art rarely changes. Capacity scales with the scrape cache.
+        let img_cache = Cache::builder()
+            .time_to_live(Duration::from_secs(86_400))
+            .max_capacity(sysspec.scrape_cache_capacity().saturating_mul(2).max(2_000))
+            .build();
         Self {
             engine: Arc::new(engine),
             codec: Arc::new(codec),
             cache,
             search_cache,
+            img_cache,
             started_at: Instant::now(),
             sysspec,
             web: Arc::new(web),
@@ -294,6 +306,35 @@ pub struct DownloadMirrorDto {
     pub url: String,
 }
 
+// ---- Donghua schedule DTOs ----
+
+#[derive(Debug, Serialize)]
+pub struct ScheduleDto {
+    pub days: Vec<ScheduleDayDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScheduleDayDto {
+    pub day: String,
+    pub items: Vec<ScheduleItemDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScheduleItemDto {
+    pub id: String,
+    pub source: String,
+    pub kind: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_at: Option<i64>,
+}
+
 // ---- Anime (otakudesu) DTOs ----
 
 #[derive(Debug, Serialize)]
@@ -374,6 +415,9 @@ pub struct CosplayPostDto {
     pub videos: Vec<String>,
     pub downloads: Vec<DownloadMirrorDto>,
     pub unzip_password: Option<String>,
+    /// "Suggestions for you" — related cosplay posts, ready to render as cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommendations: Vec<SearchItemDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,6 +492,28 @@ pub struct SearchItemDto {
     /// Series/franchise name (present only for cosplay results when known)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<String>,
+}
+
+// ---- Suggest (live search suggestions) DTOs ----
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SuggestDto {
+    pub query: String,
+    pub suggestions: Vec<SuggestionItemDto>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SuggestionItemDto {
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub label: String,
+    pub value: String,
+    pub source: String,
+    pub kind: String,
+    /// Opaque id — set only for `title` suggestions that map to a concrete
+    /// result so the client can deep-link. Omitted for `tag` suggestions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -635,6 +701,11 @@ pub fn api_endpoint_docs() -> Vec<EndpointDoc> {
         },
         EndpointDoc {
             method: "GET",
+            path: "/api/v1/suggest?q={query}&source={all|provider}",
+            description: "Live search suggestions (type-ahead): catalog-derived tag + title suggestions. Best-effort; empty/failed lookups return an empty list.",
+        },
+        EndpointDoc {
+            method: "GET",
             path: "/api/v1/browse/{provider}?feed={feed}&page={n}&size={N}",
             description: "Provider home / popular / latest feed. Providers: mangaball | anichin | cosplaytele | nhentai | novelid",
         },
@@ -657,6 +728,11 @@ pub fn api_endpoint_docs() -> Vec<EndpointDoc> {
             method: "GET",
             path: "/api/v1/donghua/episode/{id}",
             description: "Donghua episode + servers + download mirrors",
+        },
+        EndpointDoc {
+            method: "GET",
+            path: "/api/v1/donghua/schedule",
+            description: "Donghua weekly release schedule (Anichin), grouped by day (Monday→Sunday)",
         },
         EndpointDoc {
             method: "GET",
@@ -733,6 +809,15 @@ fn default_page() -> u32 {
     1
 }
 
+// ---- Suggest (live search suggestions) -----------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SuggestQuery {
+    pub q: String,
+    #[serde(default = "default_source")]
+    pub source: String,
+}
+
 // ---- Browse (home / popular / latest) ------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -752,6 +837,11 @@ pub struct BrowseQuery {
     /// Optional page size (capped per provider). Ignored by HTML-paginated providers.
     #[serde(default)]
     pub size: Option<u32>,
+    /// When set ("1"/"true"), multi-source providers (e.g. anime) collapse
+    /// duplicate titles, keeping the preferred source. Used by the home page so
+    /// it doesn't show the same series twice; full browse/search leave both in.
+    #[serde(default)]
+    pub dedupe: Option<String>,
 }
 fn default_feed() -> String {
     "home".to_string()
@@ -830,6 +920,261 @@ pub async fn search(
     }
 }
 
+/// `GET /api/v1/suggest?q={query}&source={all|provider}` — live search
+/// suggestions for type-ahead dropdowns.
+///
+/// Best-effort and keystroke-driven: an empty query or a hard upstream
+/// failure returns an `ok` envelope with an empty suggestion list rather than
+/// an error, so it can never break typing in the client.
+///
+/// Suggestions come in two flavours, ordered tag-first (most specific):
+///   - `tag`   — derived from nhentai's typed tags (parody/character/tag/
+///     artist/group). The `value` uses the `[Tag Name]` exact-tag syntax so
+///     selecting it searches that tag.
+///   - `title` — derived from real search results; `value` is the title and
+///     `id` is the opaque id for deep-linking.
+pub async fn suggest(
+    State(state): State<ApiState>,
+    Query(q): Query<SuggestQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    // Trim + cap (truncate, don't error) so the client can call freely.
+    let mut qstr = q.q.trim().to_string();
+    if qstr.chars().count() > 100 {
+        qstr = qstr.chars().take(100).collect();
+    }
+
+    if qstr.is_empty() {
+        return ok(
+            StatusCode::OK,
+            SuggestDto {
+                query: String::new(),
+                suggestions: Vec::new(),
+            },
+            started,
+            false,
+            &rid,
+        );
+    }
+
+    let mut suggestions: Vec<SuggestionItemDto> = Vec::new();
+    let q_lower = qstr.to_lowercase();
+
+    // --- TAG suggestions (nhentai typed tags) ---
+    // Only when the requested source could surface nhentai results.
+    let want_nhentai = matches!(q.source.as_str(), "all" | "nhentai" | "doujin");
+    if want_nhentai {
+        let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_search(&qstr, 1);
+        if let Ok(body) = call_nhentai_search_api(&state, &url).await {
+            // The search endpoint only returns numeric `tag_ids`, not tag
+            // names/types. To build real facets we fetch the top few matching
+            // galleries' detail JSON (which carries full `tags`) in parallel
+            // and tally them — so "Genshin Impact" surfaces `parody: Genshin
+            // Impact`, `tag: full color`, etc.
+            use std::collections::HashMap;
+            let ids: Vec<u64> = body
+                .get("result")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| e.get("id").and_then(|i| i.as_u64()))
+                        .take(8)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let futs = ids.into_iter().map(|id| {
+                let st = state.clone();
+                async move {
+                    let gurl = crate::adapters::nhentai::NhentaiAdapter::api_url_for_gallery(id);
+                    call_nhentai_api(&st, &gurl).await.ok()
+                }
+            });
+            let galleries = futures::future::join_all(futs).await;
+            let mut counts: HashMap<(String, String), (u32, String)> = HashMap::new();
+            for g in galleries.into_iter().flatten() {
+                let tags = match g.get("tags").and_then(|v| v.as_array()) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                for t in tags {
+                    let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if name.is_empty()
+                        || !matches!(ttype, "parody" | "character" | "tag" | "artist" | "group")
+                    {
+                        continue;
+                    }
+                    let key = (ttype.to_string(), name.to_lowercase());
+                    let e = counts.entry(key).or_insert((0, name.to_string()));
+                    e.0 += 1;
+                }
+            }
+            // Rank: facets matching the typed text first (parody/character ahead
+            // of generic tags), then the most frequent refinement tags.
+            let type_rank = |t: &str| match t {
+                "parody" => 0,
+                "character" => 1,
+                "group" => 2,
+                "artist" => 3,
+                _ => 4,
+            };
+            let mut entries: Vec<(String, String, u32)> = counts
+                .into_iter()
+                .map(|((ttype, _lc), (count, disp))| (ttype, disp, count))
+                .collect();
+            entries.sort_by(|a, b| {
+                let am = a.1.to_lowercase().contains(&q_lower);
+                let bm = b.1.to_lowercase().contains(&q_lower);
+                bm.cmp(&am)
+                    .then(type_rank(&a.0).cmp(&type_rank(&b.0)))
+                    .then(b.2.cmp(&a.2))
+            });
+            // Identify a base parody/series that matches what the user typed
+            // (e.g. "genshin impact" -> Parody: Genshin Impact). When present,
+            // we offer cumulative refinements like `[Genshin Impact] [full
+            // color]` so each pick narrows the search, nhentai-style.
+            let base_parody: Option<String> = entries
+                .iter()
+                .find(|(t, name, _)| {
+                    t == "parody" && {
+                        let n = name.to_lowercase();
+                        n.contains(&q_lower) || q_lower.contains(&n)
+                    }
+                })
+                .map(|(_, name, _)| name.clone());
+
+            use std::collections::HashMap as Hm;
+
+            if let Some(base) = base_parody.as_ref() {
+                // Standalone parody first.
+                suggestions.push(SuggestionItemDto {
+                    r#type: "tag".to_string(),
+                    label: format!("Parody: {}", base),
+                    value: format!("[{}]", base),
+                    source: "nhentai".to_string(),
+                    kind: "doujin".to_string(),
+                    id: None,
+                });
+                // Cumulative refinements: base parody + a popular facet.
+                let base_lc = base.to_lowercase();
+                let mut refine_per_type: Hm<String, u32> = Hm::new();
+                let mut refined = 0usize;
+                for (ttype, name, _count) in entries.iter() {
+                    if ttype == "parody" || name.to_lowercase() == base_lc {
+                        continue;
+                    }
+                    let cap = match ttype.as_str() {
+                        "tag" => 5,
+                        "character" => 4,
+                        _ => 2,
+                    };
+                    let c = refine_per_type.entry(ttype.clone()).or_insert(0);
+                    if *c >= cap {
+                        continue;
+                    }
+                    *c += 1;
+                    suggestions.push(SuggestionItemDto {
+                        r#type: "tag".to_string(),
+                        label: format!("{} · {}: {}", base, titlecase(ttype), name),
+                        value: format!("[{}] [{}]", base, name),
+                        source: "nhentai".to_string(),
+                        kind: "doujin".to_string(),
+                        id: None,
+                    });
+                    refined += 1;
+                    if refined >= 10 {
+                        break;
+                    }
+                }
+            } else {
+                // No clear base parody: a varied flat facet list, capping each
+                // type so `character` can't crowd out parody/tag/group/artist.
+                let type_cap = |t: &str| match t {
+                    "parody" => 3,
+                    "character" => 5,
+                    "tag" => 6,
+                    "group" => 2,
+                    "artist" => 3,
+                    _ => 2,
+                };
+                let mut per_type: Hm<String, u32> = Hm::new();
+                let mut picked = 0usize;
+                for (ttype, name, _count) in entries.iter() {
+                    let c = per_type.entry(ttype.clone()).or_insert(0);
+                    if *c >= type_cap(ttype) {
+                        continue;
+                    }
+                    *c += 1;
+                    suggestions.push(SuggestionItemDto {
+                        r#type: "tag".to_string(),
+                        label: format!("{}: {}", titlecase(ttype), name),
+                        value: format!("[{}]", name),
+                        source: "nhentai".to_string(),
+                        kind: "doujin".to_string(),
+                        id: None,
+                    });
+                    picked += 1;
+                    if picked >= 14 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- TITLE suggestions (real search results) ---
+    // Reuse the existing search path so titles + ids match the search UX.
+    if let Ok(data) = run_search(&state, &qstr, &q.source, 1).await {
+        let mut seen_titles: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in data.items.into_iter() {
+            let key = item.title.to_lowercase();
+            if key.is_empty() || !seen_titles.insert(key) {
+                continue;
+            }
+            suggestions.push(SuggestionItemDto {
+                r#type: "title".to_string(),
+                label: item.title.clone(),
+                value: item.title,
+                source: item.source,
+                kind: item.kind,
+                id: Some(item.id),
+            });
+            // Tag suggestions occupy the head; cap the title block so the
+            // combined list stays around a dozen entries.
+            let title_count = suggestions.iter().filter(|s| s.r#type == "title").count();
+            if title_count >= 8 {
+                break;
+            }
+        }
+    }
+
+    // Cap the total to keep the dropdown tidy (tags already lead the list).
+    suggestions.truncate(18);
+
+    ok(
+        StatusCode::OK,
+        SuggestDto {
+            query: qstr,
+            suggestions,
+        },
+        started,
+        false,
+        &rid,
+    )
+}
+
+/// Title-case a lowercase tag-type token (e.g. "parody" -> "Parody").
+fn titlecase(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 async fn run_search(
     state: &ApiState,
     query: &str,
@@ -842,14 +1187,20 @@ async fn run_search(
         "cosplay" | "cosplaytele" => vec![SearchSource::Cosplaytele],
         "nhentai" | "doujin" => vec![SearchSource::Nhentai],
         "novel" | "novelid" => vec![SearchSource::Novelid],
-        "anime" | "otakudesu" => vec![SearchSource::Otakudesu],
+        "anime" | "otakudesu" => vec![SearchSource::Otakudesufit, SearchSource::Otakudesu],
+        "lmanime" | "lm" => vec![SearchSource::Lmanime],
+        "movie" | "lk21" | "film" => vec![SearchSource::Lk21],
+        "nekopoi" | "hentai" => vec![SearchSource::Nekopoi],
         "all" => vec![
             SearchSource::Mangaball,
             SearchSource::Anichin,
             SearchSource::Cosplaytele,
             SearchSource::Nhentai,
             SearchSource::Novelid,
+            SearchSource::Otakudesufit,
             SearchSource::Otakudesu,
+            SearchSource::Lmanime,
+            SearchSource::Lk21,
         ],
         other => return Err(format!("Unknown source '{}'", other)),
     };
@@ -934,6 +1285,128 @@ fn normalize_for_match(s: &str) -> String {
     out.trim().to_string()
 }
 
+/// Extract a season number from a normalized anime title, handling both
+/// "season 4" and "4th season" forms (ignores other stray numbers like
+/// "2 nensei").
+fn anime_season(norm: &str) -> Option<u32> {
+    static SEASON_RE: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(r"(?:season\s+(\d+))|(?:(\d+)\s*(?:st|nd|rd|th)\s+season)").unwrap()
+    });
+    SEASON_RE.captures(norm).and_then(|c| {
+        c.get(1)
+            .or_else(|| c.get(2))
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+    })
+}
+
+/// A dedup key for an anime title. Collapses the same series listed under
+/// different romanizations across otakudesu.fit / .blog:
+///   - `tokens`: significant tokens (particles / fansub markers / season
+///     markers removed) for fuzzy overlap matching (handles truncated
+///     romanizations, e.g. blog dropping "reijou"/"na"/"no").
+///   - `squash`: those same tokens concatenated in order, which is agnostic to
+///     word-splitting differences (e.g. "Himekishi" vs "Hime Kishi").
+///   - `season`: detected season number so different seasons stay distinct.
+struct AnimeKey {
+    tokens: std::collections::HashSet<String>,
+    squash: String,
+    season: Option<u32>,
+}
+
+fn anime_series_key(title: &str) -> AnimeKey {
+    // Low-signal tokens that vary between romanizations / sources and would
+    // otherwise dilute the overlap ratio: Japanese grammatical particles, the
+    // "sub indo" / fansub markers blog appends, and English articles.
+    const STOPWORDS: &[&str] = &[
+        "no",
+        "na",
+        "ni",
+        "wa",
+        "wo",
+        "ga",
+        "e",
+        "to",
+        "ne",
+        "da",
+        "de",
+        "mo",
+        "ya",
+        "yo",
+        "desu",
+        "the",
+        "a",
+        "an",
+        "of",
+        "sub",
+        "indo",
+        "subtitle",
+        "indonesia",
+        "season",
+    ];
+    let norm = normalize_for_match(title);
+    let season = anime_season(&norm);
+    let mut skip_next_season_word = false;
+    let mut tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+    let parts: Vec<&str> = norm.split_whitespace().collect();
+    for (i, tok) in parts.iter().enumerate() {
+        // Drop the literal "season" token and the adjacent number/ordinal.
+        if *tok == "season" {
+            skip_next_season_word = true;
+            continue;
+        }
+        if skip_next_season_word {
+            skip_next_season_word = false;
+            if tok.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+        }
+        // Drop an ordinal-season token like "4th" when followed by "season".
+        if parts.get(i + 1).copied() == Some("season")
+            && tok
+                .trim_end_matches(|c: char| c.is_alphabetic())
+                .parse::<u32>()
+                .is_ok()
+        {
+            continue;
+        }
+        // Drop grammatical particles / fansub markers.
+        if STOPWORDS.contains(tok) {
+            continue;
+        }
+        tokens.insert((*tok).to_string());
+        ordered.push((*tok).to_string());
+    }
+    let squash = ordered.join("");
+    AnimeKey {
+        tokens,
+        squash,
+        season,
+    }
+}
+
+/// Whether two anime titles denote the same series.
+fn same_anime_series(a: &AnimeKey, b: &AnimeKey) -> bool {
+    // Different explicit seasons => different entries.
+    if let (Some(sa), Some(sb)) = (a.season, b.season) {
+        if sa != sb {
+            return false;
+        }
+    }
+    // Word-split-agnostic exact match: "Himekishi wa Barbaroi no Yome" vs
+    // "Hime Kishi wa Barbaroi no Yome" squash to the same string.
+    if !a.squash.is_empty() && a.squash == b.squash {
+        return true;
+    }
+    let min_len = a.tokens.len().min(b.tokens.len());
+    if min_len < 3 {
+        // Too short to fuzzy-match safely; require exact token-set equality.
+        return a.tokens == b.tokens;
+    }
+    let inter = a.tokens.intersection(&b.tokens).count();
+    (inter as f64) / (min_len as f64) >= 0.8
+}
+
 /// Heuristic relevance score of a result title against a normalized query.
 fn relevance_score(title: &str, q_norm: &str, q_terms: &[String]) -> i64 {
     if q_norm.is_empty() {
@@ -1000,6 +1473,22 @@ async fn run_single_search(
     }
     if matches!(source, SearchSource::Nhentai) {
         let (items, total_pages) = search_nhentai_sorted(state, query, page, "").await?;
+        let has_next = total_pages.map(|tp| page < tp).unwrap_or(!items.is_empty());
+        return Ok(SingleSearch {
+            items,
+            total_pages,
+            has_next,
+        });
+    }
+    if matches!(source, SearchSource::Lk21) {
+        // lk21 keyword search hits a JSON API rather than scraping HTML.
+        let url = crate::web::search::lk21_search_api_url(query, page);
+        let body = call_lk21_search_api(state, &url).await?;
+        let total_pages = body
+            .get("totalPages")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let items = crate::web::search::parse_lk21_search_json(&body);
         let has_next = total_pages.map(|tp| page < tp).unwrap_or(!items.is_empty());
         return Ok(SingleSearch {
             items,
@@ -1242,6 +1731,10 @@ fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
         "nhentai" => (Source::Nhentai, "doujin"),
         "novelid" => (Source::Novelid, "novel"),
         "otakudesu" => (Source::Otakudesu, "anime"),
+        "otakudesufit" => (Source::Otakudesufit, "anime"),
+        "lmanime" => (Source::Lmanime, "lmanime"),
+        "lk21" => (Source::Lk21, "movie"),
+        "nekopoi" => (Source::Nekopoi, "nekopoi"),
         _ => (Source::Mangaball, "unknown"),
     };
     let opaque_kind = match source {
@@ -1249,8 +1742,10 @@ fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
         | Source::Anichin
         | Source::Nhentai
         | Source::Novelid
-        | Source::Otakudesu => Kind::Series,
-        Source::Cosplaytele => Kind::Post,
+        | Source::Otakudesu
+        | Source::Otakudesufit
+        | Source::Lmanime => Kind::Series,
+        Source::Cosplaytele | Source::Lk21 | Source::Nekopoi => Kind::Post,
     };
     let id = state.codec.encode(source, opaque_kind, &raw.url);
     SearchItemDto {
@@ -1267,6 +1762,58 @@ fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
     }
 }
 
+// ---- Donghua schedule -----------------------------------------------------
+
+/// `GET /api/v1/donghua/schedule` — Anichin weekly release schedule.
+///
+/// Fetches the schedule page fresh each call (the engine maintains its own
+/// HTML cache), parses the day blocks, and maps each entry to a
+/// `ScheduleItemDto` whose `id` is the opaque-encoded series URL (so it opens
+/// the existing donghua detail flow) and whose `thumbnail` is routed through
+/// the image proxy.
+pub async fn donghua_schedule(State(state): State<ApiState>, req: Request) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    let url = crate::adapters::anichin::AnichinAdapter::schedule_url();
+    let html = match state.engine.fetch_html(url).await {
+        Ok(h) => h,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+                e.to_string(),
+                started,
+                &rid,
+            );
+        }
+    };
+
+    let parsed = crate::adapters::anichin::AnichinAdapter::parse_schedule(url, &html);
+    let days: Vec<ScheduleDayDto> = parsed
+        .into_iter()
+        .map(|d| ScheduleDayDto {
+            day: d.day,
+            items: d
+                .items
+                .into_iter()
+                .map(|it| ScheduleItemDto {
+                    id: state.codec.encode(Source::Anichin, Kind::Series, &it.url),
+                    source: "anichin".to_string(),
+                    kind: "donghua".to_string(),
+                    title: it.title,
+                    thumbnail: proxy_opt(&state, it.thumbnail.as_deref()),
+                    episode: it.episode,
+                    time_label: it.time_label,
+                    release_at: it.release_at,
+                })
+                .collect(),
+        })
+        .collect();
+
+    ok(StatusCode::OK, ScheduleDto { days }, started, false, &rid)
+}
+
 // ---- Browse (home / popular / latest) ------------------------------------
 
 /// Generic browse handler: `GET /api/v1/{provider}/browse?feed=<feed>&page=<n>`.
@@ -1281,12 +1828,14 @@ pub async fn browse(
     let rid = req_id(req.headers());
 
     let p = q.page.max(1);
+    let dedupe = matches!(q.dedupe.as_deref(), Some("1") | Some("true") | Some("yes"));
     let cache_key = format!(
-        "browse:{}|{}|{}|{}",
+        "browse:{}|{}|{}|{}|{}",
         provider,
         q.feed,
         p,
-        q.size.unwrap_or(0)
+        q.size.unwrap_or(0),
+        dedupe as u8
     );
     let cached = state.search_cache.get(&cache_key).await.is_some();
 
@@ -1299,7 +1848,7 @@ pub async fn browse(
     let arc = state
         .search_cache
         .try_get_with(cache_key, async move {
-            let br = run_browse(&state_clone, &provider_lc, &feed, p, size).await?;
+            let br = run_browse(&state_clone, &provider_lc, &feed, p, size, dedupe).await?;
             let has_next = br.total_pages.map(|tp| p < tp).unwrap_or(br.has_next);
             Ok::<Arc<SearchEnvelopeData>, String>(Arc::new(SearchEnvelopeData {
                 query: String::new(),
@@ -1356,6 +1905,7 @@ async fn run_browse(
     feed: &str,
     page: u32,
     size: Option<u32>,
+    dedupe: bool,
 ) -> Result<BrowseResult, String> {
     match provider {
         "mangaball" | "manga" => browse_mangaball(state, feed, page, size).await,
@@ -1363,9 +1913,184 @@ async fn run_browse(
         "cosplaytele" | "cosplay" => browse_cosplaytele(state, feed, page).await,
         "nhentai" | "doujin" => browse_nhentai(state, feed, page).await,
         "novelid" | "novel" => browse_novelid(state, feed, page).await,
-        "otakudesu" | "anime" => browse_otakudesu(state, feed, page).await,
+        "otakudesu" | "anime" => browse_anime_merged(state, feed, page, dedupe).await,
+        "otakudesufit" => browse_otakudesufit(state, feed, page).await,
+        "lmanime" => browse_lmanime(state, feed, page).await,
+        "lk21" | "movie" | "film" => browse_lk21(state, feed, page).await,
+        "nekopoi" | "hentai" => browse_nekopoi(state, feed, page).await,
         _ => Err(format!("unknown provider '{}'", provider)),
     }
+}
+
+/// Merged anime browse: otakudesu.fit (primary, more complete) + otakudesu.blog
+/// (secondary). When `dedupe` is set (home page), drop blog entries whose title
+/// matches a fit entry so the same series isn't shown twice; otherwise keep
+/// both so duplicates are visible on the full browse/search.
+async fn browse_anime_merged(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+    dedupe: bool,
+) -> Result<BrowseResult, String> {
+    let (fit_res, blog_res) = futures::join!(
+        browse_otakudesufit(state, feed, page),
+        browse_otakudesu(state, feed, page),
+    );
+    let fit = fit_res.unwrap_or_else(|_| empty_browse());
+    let blog = blog_res.unwrap_or_else(|_| empty_browse());
+
+    // Always collapse the same series listed under different romanizations
+    // across the two sources (e.g. fit "Jishou Akuyaku Reijou na Konyakusha
+    // no Kansatsu Kiroku" vs blog's shortened, "-sub-indo" variant). We keep
+    // the otakudesu.fit entry (more complete metadata) and drop the blog twin
+    // regardless of feed — the `dedupe` flag now only documents intent; doubles
+    // are filtered everywhere so the same title never appears twice.
+    //
+    // fit is processed first (priority), then blog; an item is admitted only if
+    // it doesn't match any already-admitted series key, which also folds away
+    // any intra-source duplicates.
+    let _ = dedupe;
+    let mut items: Vec<SearchItemDto> = Vec::with_capacity(fit.items.len() + blog.items.len());
+    let mut keys: Vec<AnimeKey> = Vec::new();
+    for it in fit.items.into_iter().chain(blog.items) {
+        let k = anime_series_key(&it.title);
+        if keys.iter().any(|ek| same_anime_series(ek, &k)) {
+            continue;
+        }
+        keys.push(k);
+        items.push(it);
+    }
+
+    let total_pages = match (fit.total_pages, blog.total_pages) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    let has_next = fit.has_next || blog.has_next;
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
+}
+
+async fn browse_otakudesufit(
+    state: &ApiState,
+    feed: &str,
+    page: u32,
+) -> Result<BrowseResult, String> {
+    let url = crate::adapters::otakudesufit::OtakudesufitAdapter::browse_url(feed, page);
+    let (raw, total_pages) =
+        fetch_and_parse_html_listing(state, SearchSource::Otakudesufit, &url).await?;
+    let items: Vec<SearchItemDto> = raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
+}
+
+async fn browse_lk21(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
+    let url = crate::adapters::lk21::Lk21Adapter::browse_url(feed, page);
+    let html = state
+        .engine
+        .fetch_html(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let raw = crate::web::search::parse_lk21_listing(&url, &html);
+    let total_pages = crate::web::search::parse_html_total_pages(&html);
+    let items: Vec<SearchItemDto> = raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
+}
+
+async fn browse_nekopoi(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
+    let url = crate::adapters::nekopoi::NekopoiAdapter::browse_url(feed, page);
+    let html = state
+        .engine
+        .fetch_html(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let raw = crate::web::search::parse_nekopoi_listing(&url, &html);
+    let total_pages = crate::web::search::parse_html_total_pages(&html);
+    let items: Vec<SearchItemDto> = raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
+}
+
+/// GET the lk21 JSON search API with browser-like headers + Referer.
+async fn call_lk21_search_api(state: &ApiState, url: &str) -> Result<serde_json::Value, String> {
+    let fp = BrowserFingerprint::for_url(url);
+    let mut adapter_headers = fp.as_header_map();
+    adapter_headers.insert(
+        "Referer".to_string(),
+        format!("{}/", crate::adapters::lk21::LK21_BASE),
+    );
+    adapter_headers.insert(
+        "Accept".to_string(),
+        "application/json, text/plain, */*".to_string(),
+    );
+    adapter_headers.insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
+    adapter_headers.insert("Sec-Fetch-Dest".to_string(), "empty".to_string());
+    adapter_headers.insert("Sec-Fetch-Mode".to_string(), "cors".to_string());
+    adapter_headers.insert("Sec-Fetch-Site".to_string(), "cross-site".to_string());
+    adapter_headers.remove("Upgrade-Insecure-Requests");
+
+    let headers = state
+        .engine
+        .pipeline()
+        .build_headers(url, None, Some(&adapter_headers))
+        .map_err(|e| e.to_string())?;
+    let resp = state
+        .engine
+        .client()
+        .get(url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("upstream returned {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+async fn browse_lmanime(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
+    let url = crate::adapters::lmanime::LmanimeAdapter::browse_url(feed, page);
+    let (raw, total_pages) =
+        fetch_and_parse_html_listing(state, SearchSource::Lmanime, &url).await?;
+    let items: Vec<SearchItemDto> = raw
+        .into_iter()
+        .map(|r| raw_search_to_dto(state, r))
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages,
+        has_next,
+        items,
+    })
 }
 
 async fn browse_otakudesu(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
@@ -1444,7 +2169,14 @@ async fn browse_cosplaytele(
 
 async fn browse_nhentai(state: &ApiState, feed: &str, page: u32) -> Result<BrowseResult, String> {
     let sort = crate::adapters::nhentai::NhentaiAdapter::feed_to_sort(feed);
-    let url = crate::adapters::nhentai::NhentaiAdapter::api_url_for_popular(page, sort);
+    // The plain galleries endpoint ignores `sort` (always recent), so popular
+    // feeds go through the search API with an all-matching query; only the
+    // "recent" feed uses the galleries listing.
+    let url = if sort.is_empty() {
+        crate::adapters::nhentai::NhentaiAdapter::api_url_for_popular(page, "")
+    } else {
+        crate::adapters::nhentai::NhentaiAdapter::api_url_for_search_sorted("pages:>0", page, sort)
+    };
     let body = call_nhentai_search_api(state, &url).await?;
     let (total_pages, per_page) = crate::web::search::parse_nhentai_pagination(&body);
     let raw = parse_nhentai_search(&body);
@@ -1905,7 +2637,7 @@ pub async fn anime_series(
             )
         }
     };
-    if dec.source != Source::Otakudesu {
+    if !matches!(dec.source, Source::Otakudesu | Source::Otakudesufit) {
         return err(
             StatusCode::BAD_REQUEST,
             "wrong_source",
@@ -1930,23 +2662,29 @@ pub async fn anime_series(
             )
         }
     };
-    let dto = anime_series_to_dto(&state, series, &id);
+    let dto = anime_series_to_dto_src(&state, series, &id, dec.source);
     ok(StatusCode::OK, dto, started, cached, &rid)
 }
 
 fn anime_episode_ref_to_dto(
     state: &ApiState,
     e: &crate::models::AnimeEpisodeRef,
+    source: Source,
 ) -> AnimeEpisodeRefDto {
     AnimeEpisodeRefDto {
-        id: state.codec.encode(Source::Otakudesu, Kind::Item, &e.url),
+        id: state.codec.encode(source, Kind::Item, &e.url),
         number: e.number,
         title: e.title.clone(),
         date: e.date.clone(),
     }
 }
 
-fn anime_series_to_dto(state: &ApiState, s: &AnimeSeries, id: &str) -> AnimeSeriesDto {
+fn anime_series_to_dto_src(
+    state: &ApiState,
+    s: &AnimeSeries,
+    id: &str,
+    source: Source,
+) -> AnimeSeriesDto {
     AnimeSeriesDto {
         id: id.to_string(),
         title: s.title.clone().unwrap_or_default(),
@@ -1966,12 +2704,12 @@ fn anime_series_to_dto(state: &ApiState, s: &AnimeSeries, id: &str) -> AnimeSeri
         episodes: s
             .episodes
             .iter()
-            .map(|e| anime_episode_ref_to_dto(state, e))
+            .map(|e| anime_episode_ref_to_dto(state, e, source))
             .collect(),
         batch: s
             .batch
             .iter()
-            .map(|e| anime_episode_ref_to_dto(state, e))
+            .map(|e| anime_episode_ref_to_dto(state, e, source))
             .collect(),
     }
 }
@@ -1995,7 +2733,7 @@ pub async fn anime_episode(
             )
         }
     };
-    if dec.source != Source::Otakudesu {
+    if !matches!(dec.source, Source::Otakudesu | Source::Otakudesufit) {
         return err(
             StatusCode::BAD_REQUEST,
             "wrong_source",
@@ -2020,27 +2758,32 @@ pub async fn anime_episode(
             )
         }
     };
-    let dto = anime_episode_to_dto(&state, ep, &id);
+    let dto = anime_episode_to_dto_src(&state, ep, &id, dec.source);
     ok(StatusCode::OK, dto, started, cached, &rid)
 }
 
-fn anime_episode_to_dto(state: &ApiState, e: &AnimeEpisode, id: &str) -> AnimeEpisodeDto {
+fn anime_episode_to_dto_src(
+    state: &ApiState,
+    e: &AnimeEpisode,
+    id: &str,
+    source: Source,
+) -> AnimeEpisodeDto {
     AnimeEpisodeDto {
         id: id.to_string(),
         series_title: e.series_title.clone(),
         series_id: e
             .series_url
             .as_deref()
-            .map(|u| state.codec.encode(Source::Otakudesu, Kind::Series, u)),
+            .map(|u| state.codec.encode(source, Kind::Series, u)),
         episode_number: e.episode_number,
         prev_id: e
             .prev_episode
             .as_deref()
-            .map(|u| state.codec.encode(Source::Otakudesu, Kind::Item, u)),
+            .map(|u| state.codec.encode(source, Kind::Item, u)),
         next_id: e
             .next_episode
             .as_deref()
-            .map(|u| state.codec.encode(Source::Otakudesu, Kind::Item, u)),
+            .map(|u| state.codec.encode(source, Kind::Item, u)),
         default_embed: e.default_embed.clone(),
         mirrors: e
             .mirrors
@@ -2151,7 +2894,7 @@ pub async fn anime_stream(
         }
     };
 
-    match resolve_otakudesu_stream(&state, episode_url, token).await {
+    match resolve_anime_stream(&state, episode_url, token).await {
         Ok(embed) => ok(
             StatusCode::OK,
             serde_json::json!({ "type": "embed", "url": embed }),
@@ -2160,6 +2903,22 @@ pub async fn anime_stream(
             &rid,
         ),
         Err(e) => err(StatusCode::BAD_GATEWAY, "resolve_failed", e, started, &rid),
+    }
+}
+
+/// Dispatch stream resolution by upstream host: otakudesu.fit encodes the
+/// player as a base64 HTML fragment (decoded locally); otakudesu.blog uses a
+/// two-step admin-ajax handshake.
+async fn resolve_anime_stream(
+    state: &ApiState,
+    episode_url: &str,
+    token: &str,
+) -> Result<String, String> {
+    if episode_url.contains("otakudesu.fit") {
+        crate::adapters::otakudesufit::OtakudesufitAdapter::embed_from_token(token)
+            .ok_or_else(|| "could not decode embed".to_string())
+    } else {
+        resolve_otakudesu_stream(state, episode_url, token).await
     }
 }
 
@@ -2253,6 +3012,797 @@ async fn resolve_otakudesu_stream(
         .ok_or_else(|| "bad stream fragment".to_string())?;
     crate::adapters::otakudesu::OtakudesuAdapter::embed_src_from_fragment(&fragment)
         .ok_or_else(|| "no embed url in fragment".to_string())
+}
+
+// ---- lmanime (Chinese anime / donghua, English & multi-sub) ---------------
+
+/// `GET /api/v1/lmanime/{id}` — lmanime.com series detail (episode list).
+pub async fn lmanime_series(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Lmanime {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not lmanime",
+            started,
+            &rid,
+        );
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let series = match &result.content {
+        Some(ContentModel::AnimeSeries(s)) => s,
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield an anime series",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = anime_series_to_dto_src(&state, series, &id, Source::Lmanime);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+/// `GET /api/v1/lmanime/episode/{id}` — lmanime episode (servers + downloads).
+pub async fn lmanime_episode(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Lmanime {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not lmanime",
+            started,
+            &rid,
+        );
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let ep = match &result.content {
+        Some(ContentModel::AnimeEpisode(e)) => e,
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield an anime episode",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = anime_episode_to_dto_src(&state, ep, &id, Source::Lmanime);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+/// `GET /api/v1/lmanime-stream?id=...` — resolve a signed lmanime server token
+/// (a `/v/N/` page) into a playable embed URL by fetching it and pulling the
+/// iframe `src`.
+pub async fn lmanime_stream(
+    State(state): State<ApiState>,
+    Query(q): Query<AnimeStreamQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    let (payload, sig) = match q.id.split_once('.') {
+        Some(p) => p,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Malformed stream id",
+                started,
+                &rid,
+            )
+        }
+    };
+    if !state.codec.verify_image(payload, sig) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "bad_signature",
+            "Stream id signature is invalid",
+            started,
+            &rid,
+        );
+    }
+    let raw = match URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+    {
+        Some(s) => s,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "Stream payload is not valid",
+                started,
+                &rid,
+            )
+        }
+    };
+    // Payload is "<episode_url>|<v-page url>"; only the v-page is needed.
+    let v_url = raw.split_once('|').map(|(_, t)| t).unwrap_or(&raw);
+    if !v_url.contains("lmanime.com") {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "bad_payload",
+            "Stream target not allowed",
+            started,
+            &rid,
+        );
+    }
+
+    match state.engine.fetch_html(v_url).await {
+        Ok(html) => {
+            let parser = crate::parser::HtmlParser::parse(&html);
+            let embed = parser
+                .attr("#pembed iframe", "src")
+                .or_else(|| parser.attr(".player-embed iframe", "src"))
+                .or_else(|| parser.attr("iframe", "src"));
+            match embed {
+                Some(src) => {
+                    let url = if let Some(rest) = src.strip_prefix("//") {
+                        format!("https://{}", rest)
+                    } else {
+                        src
+                    };
+                    ok(
+                        StatusCode::OK,
+                        serde_json::json!({ "type": "embed", "url": url }),
+                        started,
+                        false,
+                        &rid,
+                    )
+                }
+                None => err(
+                    StatusCode::BAD_GATEWAY,
+                    "resolve_failed",
+                    "no embed url on server page".to_string(),
+                    started,
+                    &rid,
+                ),
+            }
+        }
+        Err(e) => err(
+            StatusCode::BAD_GATEWAY,
+            "resolve_failed",
+            e.to_string(),
+            started,
+            &rid,
+        ),
+    }
+}
+
+// ---- lk21 (movies) --------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct MovieDto {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synopsis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poster: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rating: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    pub genres: Vec<String>,
+    pub countries: Vec<String>,
+    pub directors: Vec<String>,
+    pub cast: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed_url: Option<String>,
+    /// Switchable player servers. The client picks one and calls
+    /// `/api/v1/movie-stream/{id}?server={name}` to resolve it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<MovieServerDto>,
+    /// "MOVIE TERKAIT" related suggestions (opaque movie IDs).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<MovieRelatedDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    /// Original source page — the upstream player blocks third-party embedding
+    /// (CSP frame-ancestors) and can't be proxied, so the UI opens this in a
+    /// new tab to actually watch.
+    pub watch_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MovieServerDto {
+    pub name: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MovieRelatedDto {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poster: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<String>,
+}
+
+/// `GET /api/v1/movie/{id}` — LayarKaca21 movie detail.
+pub async fn lk21_movie(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Lk21 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not lk21",
+            started,
+            &rid,
+        );
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let movie = match &result.content {
+        Some(ContentModel::Movie(m)) => m,
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a movie",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = movie_to_dto(&state, movie, &id);
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+fn movie_to_dto(state: &ApiState, m: &MovieDetail, id: &str) -> MovieDto {
+    MovieDto {
+        id: id.to_string(),
+        title: m.title.clone().unwrap_or_default(),
+        synopsis: m.synopsis.clone(),
+        poster: proxy_opt(state, m.poster.as_deref()),
+        year: m.year.clone(),
+        rating: m.rating.clone(),
+        quality: m.quality.clone(),
+        duration: m.duration.clone(),
+        genres: m.genres.clone(),
+        countries: m.countries.clone(),
+        directors: m.directors.clone(),
+        cast: m.cast.clone(),
+        release_date: m.release_date.clone(),
+        embed_url: m.embed_url.clone(),
+        servers: m
+            .servers
+            .iter()
+            .map(|s| MovieServerDto {
+                name: s.name.clone(),
+                label: s.label.clone(),
+            })
+            .collect(),
+        related: m
+            .related
+            .iter()
+            .map(|r| MovieRelatedDto {
+                id: state.codec.encode(Source::Lk21, Kind::Post, &r.url),
+                title: r.title.clone(),
+                poster: proxy_opt(state, r.poster.as_deref()),
+                year: r.year.clone(),
+            })
+            .collect(),
+        download_url: m.download_url.clone(),
+        watch_url: m.url.clone(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct NekopoiPostDto {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synopsis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    pub genres: Vec<String>,
+    /// Embeddable streaming servers; the client iframes the chosen one.
+    pub servers: Vec<NekopoiServerDto>,
+    /// Episode list when this is a multi-episode series (each links to a post).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub episodes: Vec<MovieRelatedDto>,
+    /// Download links grouped by quality.
+    pub downloads: Vec<DownloadGroupDto>,
+    /// Related post suggestions (opaque nekopoi IDs).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<MovieRelatedDto>,
+    /// Original source page (fallback "open externally").
+    pub source_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NekopoiServerDto {
+    pub name: String,
+    pub label: String,
+    /// Directly embeddable player URL (these hosts allow iframing).
+    pub embed_url: String,
+}
+
+/// `GET /api/v1/nekopoi/{id}` — NekoPoi adult-anime post detail (18+).
+pub async fn nekopoi_post(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Nekopoi {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not nekopoi",
+            started,
+            &rid,
+        );
+    }
+    let (result, cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let post = match &result.content {
+        Some(ContentModel::NekopoiPost(p)) => p,
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a nekopoi post",
+                started,
+                &rid,
+            )
+        }
+    };
+    let dto = NekopoiPostDto {
+        id: id.clone(),
+        title: post.title.clone().unwrap_or_default(),
+        synopsis: post.synopsis.clone(),
+        cover: proxy_opt(&state, post.cover.as_deref()),
+        date: post.date.clone(),
+        genres: post.genres.clone(),
+        servers: post
+            .servers
+            .iter()
+            .map(|s| NekopoiServerDto {
+                name: s.name.clone(),
+                label: s.label.clone(),
+                embed_url: s.embed_url.clone(),
+            })
+            .collect(),
+        episodes: post
+            .episodes
+            .iter()
+            .map(|e| MovieRelatedDto {
+                id: state.codec.encode(Source::Nekopoi, Kind::Post, &e.url),
+                title: e.title.clone(),
+                poster: proxy_opt(&state, e.poster.as_deref()),
+                year: e.year.clone(),
+            })
+            .collect(),
+        downloads: post
+            .downloads
+            .iter()
+            .map(|g| DownloadGroupDto {
+                quality: g.quality.clone(),
+                mirrors: g
+                    .mirrors
+                    .iter()
+                    .map(|m| DownloadMirrorDto {
+                        name: m.name.clone(),
+                        url: m.url.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        related: post
+            .related
+            .iter()
+            .map(|r| MovieRelatedDto {
+                id: state.codec.encode(Source::Nekopoi, Kind::Post, &r.url),
+                title: r.title.clone(),
+                poster: proxy_opt(&state, r.poster.as_deref()),
+                year: r.year.clone(),
+            })
+            .collect(),
+        source_url: post.url.clone(),
+    };
+    ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+/// Query for the opaque-ID rehydration endpoint.
+#[derive(Debug, Deserialize)]
+pub struct ResolveQuery {
+    /// base64url(raw provider URL) — the (secret-independent) payload segment
+    /// of an opaque ID.
+    pub u: String,
+    /// Source short code ("mb", "ac", "lk", ...).
+    pub source: String,
+    /// Kind short code ('s' series / 'i' item / 'p' post). Defaults to series.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// `GET /api/v1/resolve?source=&kind=&u=` — re-sign a known provider URL into a
+/// fresh opaque ID.
+///
+/// This lets the web app self-heal a saved favorite / history entry whose
+/// opaque ID became invalid (e.g. the signing secret changed across a
+/// redeploy). It is **not** an open URL signer: the decoded URL must resolve to
+/// the claimed source's own host (`Source::detect`), so it can never be used to
+/// mint IDs pointing at arbitrary or internal addresses.
+pub async fn resolve(
+    State(state): State<ApiState>,
+    Query(q): Query<ResolveQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let source = match Source::from_short(&q.source) {
+        Some(s) => s,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_source",
+                "unknown source code",
+                started,
+                &rid,
+            )
+        }
+    };
+    let url = match URL_SAFE_NO_PAD
+        .decode(q.u.as_bytes())
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+    {
+        Some(u) => u,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "u is not valid base64url",
+                started,
+                &rid,
+            )
+        }
+    };
+    if Source::detect(&url) != Some(source) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "host_mismatch",
+            "URL host does not belong to the claimed source",
+            started,
+            &rid,
+        );
+    }
+    let kind = q
+        .kind
+        .as_deref()
+        .and_then(|s| s.chars().next())
+        .and_then(Kind::from_short)
+        .unwrap_or(Kind::Series);
+    let id = state.codec.encode(source, kind, &url);
+    ok(
+        StatusCode::OK,
+        serde_json::json!({ "id": id, "source": source.short_code(), "kind": kind.short_code().to_string() }),
+        started,
+        false,
+        &rid,
+    )
+}
+
+/// Extract the player token id from a playeriframe embed URL
+/// (`/iframe/p2p/<ID>` path segment, or a `?id=<ID>` query param).
+fn extract_player_id(embed: &str) -> Option<String> {
+    let u = url::Url::parse(embed).ok()?;
+    if let Some((_, v)) = u.query_pairs().find(|(k, _)| k == "id") {
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    u.path_segments()?
+        .rfind(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Brutal-sniff a playable HLS URL for an lk21 movie embed.
+///
+/// The lk21 player chain is: `playeriframe.sbs/iframe/p2p/<ID>` →
+/// `cloud.hownetwork.xyz/video.php?id=<ID>` (jwplayer) whose `init.min.js`
+/// POSTs `api2.php?id=<ID>` with `{r: referrer, d: hostname}` and gets back
+/// `{ "file": "<master .m3u8>", "type": "hls" }`. We replicate that POST
+/// server-side (the CDN is Referer-locked) and return the master playlist.
+async fn resolve_lk21_stream(state: &ApiState, embed_url: &str) -> Result<String, String> {
+    let id = extract_player_id(embed_url).ok_or_else(|| "no player id in embed".to_string())?;
+    let api = format!("https://cloud.hownetwork.xyz/api2.php?id={}", id);
+
+    let fp = BrowserFingerprint::for_url(&api);
+    let mut hdrs = fp.as_header_map();
+    hdrs.insert(
+        "Referer".to_string(),
+        "https://playeriframe.sbs/".to_string(),
+    );
+    hdrs.insert(
+        "Origin".to_string(),
+        "https://cloud.hownetwork.xyz".to_string(),
+    );
+    hdrs.insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
+    hdrs.insert(
+        "Accept".to_string(),
+        "application/json, text/plain, */*".to_string(),
+    );
+    hdrs.remove("Accept-Encoding");
+    hdrs.remove("Upgrade-Insecure-Requests");
+    let headers = state
+        .engine
+        .pipeline()
+        .build_headers(&api, None, Some(&hdrs))
+        .map_err(|e| e.to_string())?;
+
+    let resp = state
+        .engine
+        .client()
+        .post(&api)
+        .headers(headers)
+        .form(&[
+            ("r", "https://playeriframe.sbs/"),
+            ("d", "playeriframe.sbs"),
+        ])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("api2 returned {}", resp.status()));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let file = json
+        .get("file")
+        .and_then(|v| v.as_str())
+        .filter(|s| s.contains(".m3u8"))
+        .ok_or_else(|| "no playable file in api2 response".to_string())?;
+    Ok(file.to_string())
+}
+
+/// `GET /api/v1/movie-stream/{id}?server={name}` — resolve an lk21 movie into
+/// a playable source. P2P (the hownetwork chain) is sniffed to a proxied HLS
+/// master playlist and played inline; the other servers (turbovip / cast /
+/// hydrax) are their own embeddable players, so we unwrap the ad-laden
+/// `playeriframe.sbs` shell to the real inner iframe and hand that to the UI.
+#[derive(Debug, Deserialize)]
+pub struct MovieStreamQuery {
+    #[serde(default)]
+    pub server: Option<String>,
+}
+
+/// Unwrap a `playeriframe.sbs/iframe/<server>/<id>` shell to its real inner
+/// player iframe (e.g. `emturbovid.com/t/<id>`, `abyssplayer.com/<id>`).
+async fn resolve_inner_embed(state: &ApiState, wrapper: &str) -> Result<String, String> {
+    static INNER_IFRAME_RE: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(r#"(?is)embed-container.*?<iframe[^>]*\bsrc=["']([^"']+)["']"#).unwrap()
+    });
+    static ANY_IFRAME_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r#"(?is)<iframe[^>]*\bsrc=["']([^"']+)["']"#).unwrap());
+
+    let fp = BrowserFingerprint::for_url(wrapper);
+    let mut hdrs = fp.as_header_map();
+    hdrs.insert(
+        "Referer".to_string(),
+        "https://tv11.lk21official.cc/".to_string(),
+    );
+    hdrs.remove("Accept-Encoding");
+    let headers = state
+        .engine
+        .pipeline()
+        .build_headers(wrapper, None, Some(&hdrs))
+        .map_err(|e| e.to_string())?;
+    let html = state
+        .engine
+        .client()
+        .get(wrapper)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    let inner = INNER_IFRAME_RE
+        .captures(&html)
+        .or_else(|| ANY_IFRAME_RE.captures(&html))
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+        .ok_or_else(|| "no inner player iframe found".to_string())?;
+    let inner = if let Some(rest) = inner.strip_prefix("//") {
+        format!("https://{}", rest)
+    } else {
+        inner
+    };
+    Ok(inner)
+}
+
+pub async fn movie_stream(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<MovieStreamQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Lk21 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not lk21",
+            started,
+            &rid,
+        );
+    }
+    let (result, _cached) = match cached_scrape(&state, &dec.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    };
+    let movie = match &result.content {
+        Some(ContentModel::Movie(m)) => m,
+        _ => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "wrong_kind",
+                "URL did not yield a movie",
+                started,
+                &rid,
+            )
+        }
+    };
+
+    // Pick the requested server, else the first available, else the default
+    // embed. P2P is identified by name/URL and sniffed to HLS; the rest are
+    // unwrapped to their inner embeddable player.
+    let want = q.server.as_deref().map(|s| s.to_lowercase());
+    let chosen = want
+        .as_deref()
+        .and_then(|n| movie.servers.iter().find(|s| s.name == n))
+        .or_else(|| movie.servers.iter().find(|s| s.name == "p2p"))
+        .or_else(|| movie.servers.first());
+
+    let (embed, is_p2p) = match chosen {
+        Some(s) => (
+            s.embed_url.clone(),
+            s.name == "p2p" || s.embed_url.contains("/p2p/"),
+        ),
+        None => match &movie.embed_url {
+            Some(e) => (e.clone(), e.contains("/p2p/") || e.contains("hownetwork")),
+            None => {
+                return err(
+                    StatusCode::BAD_GATEWAY,
+                    "no_embed",
+                    "Movie has no player embed",
+                    started,
+                    &rid,
+                )
+            }
+        },
+    };
+
+    if is_p2p {
+        if let Ok(master) = resolve_lk21_stream(&state, &embed).await {
+            let hls = signed_hls_url(&state, &master);
+            return ok(
+                StatusCode::OK,
+                serde_json::json!({ "type": "hls", "url": hls }),
+                started,
+                false,
+                &rid,
+            );
+        }
+        // Fall through to an iframe unwrap if the HLS sniff fails.
+    }
+
+    match resolve_inner_embed(&state, &embed).await {
+        Ok(inner) => ok(
+            StatusCode::OK,
+            serde_json::json!({ "type": "iframe", "url": inner }),
+            started,
+            false,
+            &rid,
+        ),
+        Err(e) => err(StatusCode::BAD_GATEWAY, "resolve_failed", e, started, &rid),
+    }
 }
 
 pub async fn donghua_episode(
@@ -2436,6 +3986,27 @@ fn cosplay_to_dto(state: &ApiState, c: &CosplayPost, id: &str) -> CosplayPostDto
             })
             .collect(),
         unzip_password: c.unzip_password.clone(),
+        recommendations: c
+            .recommendations
+            .iter()
+            .map(|r| {
+                raw_search_to_dto(
+                    state,
+                    SearchResultItem {
+                        source: "cosplaytele".to_string(),
+                        title: r.title.clone(),
+                        url: r.url.clone(),
+                        thumbnail: r.thumbnail.clone(),
+                        kind: Some("cosplay_post".to_string()),
+                        snippet: None,
+                        tags: Vec::new(),
+                        cosplayer: None,
+                        character: None,
+                        series: None,
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
@@ -2568,7 +4139,7 @@ pub async fn hls_proxy(
             )
         }
     };
-    if !is_allowed_hls_host(&url) {
+    if is_blocked_hls_target(&url) {
         return err(
             StatusCode::FORBIDDEN,
             "host_not_allowed",
@@ -2580,7 +4151,19 @@ pub async fn hls_proxy(
 
     let fp = BrowserFingerprint::for_url(&url);
     let mut hdrs = fp.as_header_map();
-    hdrs.insert("Referer".to_string(), "https://cossora.stream/".to_string());
+    // Referer is host-specific. cossora playlists are locked to cossora.stream;
+    // everything else through this proxy is the lk21 chain (hownetwork playlists
+    // + rotating segment CDNs), all of which expect the hownetwork referer.
+    let host = url::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_lowercase))
+        .unwrap_or_default();
+    let referer = if host.contains("cossora") {
+        "https://cossora.stream/".to_string()
+    } else {
+        "https://cloud.hownetwork.xyz/".to_string()
+    };
+    hdrs.insert("Referer".to_string(), referer);
     // Let reqwest manage compression so playlists are auto-decompressed.
     hdrs.remove("Accept-Encoding");
     let headers = match state
@@ -2652,8 +4235,12 @@ pub async fn hls_proxy(
 
     if is_playlist {
         // Rewrite URLs in the playlist to route back through this proxy.
+        // cossora serves segments CORS-open (fetched direct by the browser);
+        // the lk21 chain (everything else here) locks segments to the
+        // hownetwork referer + rotates their host, so segments must be proxied.
+        let proxy_segments = !host.contains("cossora");
         let text = String::from_utf8_lossy(&bytes);
-        let rewritten = rewrite_m3u8(&state, &text, &url);
+        let rewritten = rewrite_m3u8(&state, &text, &url, proxy_segments);
         let mut headers = HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
@@ -2695,7 +4282,7 @@ pub async fn hls_proxy(
 /// their **absolute** CDN URLs and fetched **directly by the client** (the
 /// cossora CDN serves them with `Access-Control-Allow-Origin: *` and no
 /// token). This keeps all the large traffic client<->CDN, off our server.
-fn rewrite_m3u8(state: &ApiState, text: &str, base: &str) -> String {
+fn rewrite_m3u8(state: &ApiState, text: &str, base: &str, proxy_segments: bool) -> String {
     let base_url = url::Url::parse(base).ok();
     let absolutize = |raw: &str| -> Option<String> {
         if raw.starts_with("http://") || raw.starts_with("https://") {
@@ -2709,10 +4296,11 @@ fn rewrite_m3u8(state: &ApiState, text: &str, base: &str) -> String {
         let path = abs.split(['?', '#']).next().unwrap_or(abs);
         path.to_lowercase().ends_with(".m3u8")
     };
-    // Playlists -> proxied + signed; everything else -> direct absolute URL.
+    // Playlists -> always proxied + signed. Segments -> proxied when
+    // `proxy_segments` (origin-locked CDN), otherwise direct absolute URL.
     let resolve = |raw: &str| -> Option<String> {
         let abs = absolutize(raw)?;
-        if is_playlist_ref(&abs) {
+        if is_playlist_ref(&abs) || proxy_segments {
             Some(signed_hls_url(state, &abs))
         } else {
             Some(abs)
@@ -2762,16 +4350,57 @@ where
     Some(format!("{}{}{}", &line[..start], new, &rest[end..]))
 }
 
-/// Allowlist of hosts the HLS proxy will fetch from.
-fn is_allowed_hls_host(url: &str) -> bool {
-    let host = match url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_lowercase))
-    {
-        Some(h) => h,
-        None => return false,
+/// SSRF guard for the HLS proxy.
+///
+/// Every `/hls` URL reaching this point has already been HMAC-verified — we
+/// only ever sign URLs we ourselves produced while resolving a stream or
+/// rewriting a playlist fetched from a trusted upstream (cossora / hownetwork).
+/// The remaining risk is a malicious upstream playlist pointing us at an
+/// internal address, so rather than a static host allowlist — unworkable
+/// against the lk21 segment CDN, which rotates every segment across throwaway
+/// domains (`qornexia.xyz`, `blaytoro.xyz`, `zenvokar.xyz`, ...) — we allow any
+/// *public* host and refuse only loopback / private / link-local / ULA / CGNAT
+/// targets and obvious internal names.
+fn is_blocked_hls_target(url: &str) -> bool {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return true,
     };
-    host == "cossora.stream" || host.ends_with(".cossora.stream")
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return true;
+    }
+    match parsed.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.to_lowercase();
+            d == "localhost"
+                || d.ends_with(".localhost")
+                || d.ends_with(".local")
+                || d.ends_with(".internal")
+                || d.ends_with(".lan")
+                || d.ends_with(".home")
+        }
+        Some(url::Host::Ipv4(ip)) => {
+            let o = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                // CGNAT 100.64.0.0/10
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            let s = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                // unique-local fc00::/7
+                || (s[0] & 0xfe00) == 0xfc00
+                // link-local fe80::/10
+                || (s[0] & 0xffc0) == 0xfe80
+        }
+        None => true,
+    }
 }
 
 /// Build a signed `/hls?p=&s=` proxy URL for an absolute media URL.
@@ -3508,6 +5137,11 @@ pub async fn img_proxy(
         );
     }
 
+    // Serve from the in-memory image cache when warm (instant re-views).
+    if let Some(cached) = state.img_cache.get(&url).await {
+        return image_response(&cached.0, cached.1.clone(), &rid);
+    }
+
     let domain = match url::Url::parse(&url)
         .ok()
         .and_then(|u| u.host_str().map(String::from))
@@ -3607,7 +5241,36 @@ pub async fn img_proxy(
     if let Ok(v) = HeaderValue::from_str(&rid) {
         headers.insert("x-request-id", v);
     }
+
+    // Populate the image cache (skip oversized bodies to bound memory).
+    if bytes.len() <= 8 * 1024 * 1024 {
+        state
+            .img_cache
+            .insert(
+                url.clone(),
+                Arc::new((content_type.clone(), bytes.to_vec())),
+            )
+            .await;
+    }
+
     (StatusCode::OK, headers, bytes).into_response()
+}
+
+/// Build an image proxy HTTP response from a content-type + body, with the
+/// long-lived immutable cache headers used for all proxied art.
+fn image_response(content_type: &str, body: Vec<u8>, rid: &str) -> Response {
+    let mut headers = HeaderMap::new();
+    if let Ok(ct) = HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, ct);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400, immutable"),
+    );
+    if let Ok(v) = HeaderValue::from_str(rid) {
+        headers.insert("x-request-id", v);
+    }
+    (StatusCode::OK, headers, body).into_response()
 }
 
 /// Pick the right Referer for a given upstream image host. Hotlink-protected
@@ -3636,8 +5299,20 @@ fn referer_for_host(host: &str) -> String {
     if h.contains("novelid.org") {
         return "https://novelid.org/".to_string();
     }
+    if h.contains("otakudesu.fit") {
+        return "https://otakudesu.fit/".to_string();
+    }
     if h.contains("otakudesu.") {
         return "https://otakudesu.blog/".to_string();
+    }
+    if h.contains("lmanime.com") {
+        return "https://lmanime.com/".to_string();
+    }
+    if h.contains("showcdnx.com") || h.contains("lk21") || h.contains("layarkaca") {
+        return format!("{}/", crate::adapters::lk21::LK21_BASE);
+    }
+    if h.contains("nekopoi.") {
+        return "https://nekopoi.care/".to_string();
     }
     if h.contains("mangaball.net")
         || h.contains("poke-black-and-white.net")
@@ -3703,6 +5378,18 @@ fn is_allowed_image_host(url: &str) -> bool {
         return true;
     }
     if host == "otakudesu.bid" || host == "otakudesu.cloud" || host.contains("otakudesu.") {
+        return true;
+    }
+    // lmanime (covers on the main domain; some via i*.wp.com handled above)
+    if host == "lmanime.com" || host.ends_with(".lmanime.com") {
+        return true;
+    }
+    // lk21 movie posters (CDN)
+    if host == "poster.showcdnx.com" || host.ends_with(".showcdnx.com") {
+        return true;
+    }
+    // NekoPoi (covers on the main domain /wp-content + any wp/cdn subdomain)
+    if host == "nekopoi.care" || host.ends_with(".nekopoi.care") || host.contains("nekopoi.") {
         return true;
     }
 

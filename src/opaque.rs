@@ -46,6 +46,10 @@ pub enum Source {
     Nhentai,
     Novelid,
     Otakudesu,
+    Lmanime,
+    Lk21,
+    Otakudesufit,
+    Nekopoi,
 }
 
 impl Source {
@@ -57,6 +61,10 @@ impl Source {
             Source::Nhentai => "nh",
             Source::Novelid => "nv",
             Source::Otakudesu => "od",
+            Source::Lmanime => "lm",
+            Source::Lk21 => "lk",
+            Source::Otakudesufit => "of",
+            Source::Nekopoi => "np",
         }
     }
 
@@ -68,6 +76,10 @@ impl Source {
             "nh" => Some(Self::Nhentai),
             "nv" => Some(Self::Novelid),
             "od" => Some(Self::Otakudesu),
+            "lm" => Some(Self::Lmanime),
+            "lk" => Some(Self::Lk21),
+            "of" => Some(Self::Otakudesufit),
+            "np" => Some(Self::Nekopoi),
             _ => None,
         }
     }
@@ -86,8 +98,16 @@ impl Source {
             Some(Self::Nhentai)
         } else if u.contains("novelid.org") {
             Some(Self::Novelid)
+        } else if u.contains("otakudesu.fit") {
+            Some(Self::Otakudesufit)
         } else if u.contains("otakudesu.") {
             Some(Self::Otakudesu)
+        } else if u.contains("lmanime.com") {
+            Some(Self::Lmanime)
+        } else if u.contains("lk21") || u.contains("layarkaca") {
+            Some(Self::Lk21)
+        } else if u.contains("nekopoi") {
+            Some(Self::Nekopoi)
         } else {
             None
         }
@@ -152,18 +172,44 @@ impl OpaqueCodec {
         }
     }
 
-    /// Load from `APIKU_SECRET` env var (deterministic — keeps IDs valid
-    /// across restarts) or a random secret.
-    pub fn from_env_or_random() -> Self {
-        match std::env::var("APIKU_SECRET") {
-            Ok(s) if !s.is_empty() => {
+    /// Resolve the signing secret, preferring stability so issued opaque IDs and
+    /// image-proxy URLs survive restarts (otherwise saved favorites / history
+    /// and their thumbnails break after every restart).
+    ///
+    /// Order of preference:
+    ///   1. `APIKU_SECRET` env var (operator-provided; best for multi-instance).
+    ///   2. A persisted random secret on disk (auto-generated on first run, then
+    ///      reused). Location: `$APIKU_DATA_DIR/secret`, else `$HOME/.apiku/secret`,
+    ///      else `./.apiku-secret`.
+    ///   3. A fresh random secret (only if persistence fails) — logged loudly so
+    ///      operators know IDs won't be stable.
+    pub fn from_env_or_persisted() -> Self {
+        if let Ok(s) = std::env::var("APIKU_SECRET") {
+            if !s.is_empty() {
                 use sha2::Digest;
                 let digest = Sha256::digest(s.as_bytes());
+                return Self {
+                    secret: digest.to_vec(),
+                };
+            }
+        }
+        match load_or_create_persisted_secret() {
+            Some((bytes, path)) => {
+                tracing::info!(path = %path, "using persisted opaque secret (stable IDs across restarts)");
+                use sha2::Digest;
+                let digest = Sha256::digest(&bytes);
                 Self {
                     secret: digest.to_vec(),
                 }
             }
-            _ => Self::from_random(),
+            None => {
+                tracing::warn!(
+                    "could not persist an opaque secret; using a random per-process secret. \
+                     Saved favorites/history and image URLs will break on restart. \
+                     Set APIKU_SECRET=<long-random> to fix."
+                );
+                Self::from_random()
+            }
         }
     }
 
@@ -277,6 +323,59 @@ fn random_nonce_3() -> String {
     let n1 = chars[(bytes[1] as usize) % chars.len()] as char;
     let n2 = chars[(bytes[2] as usize) % chars.len()] as char;
     [n0, n1, n2].iter().collect()
+}
+
+/// Pick the path where the auto-generated opaque secret is persisted.
+fn persisted_secret_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Ok(dir) = std::env::var("APIKU_DATA_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir).join("secret"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home).join(".apiku").join("secret"));
+        }
+    }
+    // Windows fallback.
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        if !appdata.is_empty() {
+            return Some(PathBuf::from(appdata).join("apiku").join("secret"));
+        }
+    }
+    Some(PathBuf::from(".apiku-secret"))
+}
+
+/// Load a persisted secret, generating + storing one on first run. Returns the
+/// raw secret bytes and the path used, or `None` if persistence is impossible.
+fn load_or_create_persisted_secret() -> Option<(Vec<u8>, String)> {
+    let path = persisted_secret_path()?;
+    // Reuse an existing secret if present and non-trivial.
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if trimmed.len() >= 32 {
+            return Some((trimmed.as_bytes().to_vec(), path.display().to_string()));
+        }
+    }
+    // Generate a fresh 64-hex-char (256-bit) secret and persist it.
+    let a = uuid::Uuid::new_v4();
+    let b = uuid::Uuid::new_v4();
+    let mut raw = [0u8; 32];
+    raw[..16].copy_from_slice(a.as_bytes());
+    raw[16..].copy_from_slice(b.as_bytes());
+    let hexed = hex::encode(raw);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, &hexed).ok()?;
+    // Best-effort tighten permissions to owner-only on unix (it's a secret).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some((hexed.into_bytes(), path.display().to_string()))
 }
 
 #[cfg(test)]

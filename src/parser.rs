@@ -19,6 +19,11 @@ impl HtmlParser {
         }
     }
 
+    /// Borrow the underlying parsed document for advanced nested traversal.
+    pub fn document(&self) -> &Html {
+        &self.document
+    }
+
     /// Select all elements matching a CSS selector
     pub fn select_all(&self, selector: &str) -> Vec<ElementRef<'_>> {
         match Selector::parse(selector) {

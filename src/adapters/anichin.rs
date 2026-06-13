@@ -30,17 +30,53 @@ static IFRAME_SRC_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"src="([^"]+)""#).
 
 pub struct AnichinAdapter;
 
+/// A single donghua entry within a schedule day.
+#[derive(Debug, Clone)]
+pub struct ScheduleItem {
+    /// Series title.
+    pub title: String,
+    /// Absolute `/seri/...` series URL.
+    pub url: String,
+    /// Cover/thumbnail URL (absolute) when present.
+    pub thumbnail: Option<String>,
+    /// Upcoming/last episode label from the `.sb` badge (e.g. "7" or "??").
+    pub episode: Option<String>,
+    /// Release-time label from the `.bt .epx` element, e.g. "at 09:47" or
+    /// "released". `None` when the element is missing or empty.
+    pub time_label: Option<String>,
+    /// Unix release timestamp in SECONDS parsed from `data-rlsdt`. `None` when
+    /// the attribute is empty (already released) or non-numeric.
+    pub release_at: Option<i64>,
+}
+
+/// One weekday block of the release schedule.
+#[derive(Debug, Clone)]
+pub struct ScheduleDay {
+    /// Day label as shown on the page (e.g. "Monday").
+    pub day: String,
+    /// Series releasing on this day, in source order.
+    pub items: Vec<ScheduleItem>,
+}
+
 impl AnichinAdapter {
     pub fn new() -> Self {
         Self
     }
 
     /// Build a browse URL for Anichin's series catalogue.
+    ///
+    /// Uses the themesia series archive at `/seri/`, which honours an `order`
+    /// query parameter (the homepage's empty `?s=` search ignores it, which is
+    /// why every feed used to return the same list). Pagination is via a
+    /// `?page=N` query param (NOT the `/page/N/` path), matching the theme's
+    /// own "Next" pager.
+    ///
     /// `feed` values:
     ///   "home" / "latest" / "update" -> sorted by recent updates
-    ///   "popular"                    -> all-time popular
+    ///   "popular"                    -> all-time popular (most viewed)
     ///   "rating"                     -> by rating
     ///   "title" / "az"               -> A-Z
+    ///   "latest-added"               -> newest additions
     pub fn browse_url(feed: &str, page: u32) -> String {
         let p = page.max(1);
         let order = match feed {
@@ -52,10 +88,130 @@ impl AnichinAdapter {
             other => other,
         };
         if p == 1 {
-            format!("https://anichin.cafe/?s=&order={}", order)
+            format!("https://anichin.cafe/seri/?order={}", order)
         } else {
-            format!("https://anichin.cafe/page/{}/?s=&order={}", p, order)
+            format!("https://anichin.cafe/seri/?page={}&order={}", p, order)
         }
+    }
+
+    /// URL of the Anichin weekly release schedule page.
+    pub fn schedule_url() -> &'static str {
+        "https://anichin.cafe/schedule/"
+    }
+
+    /// Parse the weekly schedule page into ordered day blocks.
+    ///
+    /// The page renders one `.bixbox.schedulepage` block per weekday, each
+    /// carrying a `sch_<day>` class and a `.releases h3 span` label. Within a
+    /// block, `.listupd .bs .bsx a` anchors point at `/seri/<slug>/` series
+    /// pages. Days are returned in the order they appear on the page so the
+    /// canonical Monday→Sunday ordering is preserved. Empty days are skipped.
+    ///
+    /// Total and panic-free: missing DOM nodes are skipped rather than
+    /// unwrapped, so a layout change degrades gracefully to fewer items.
+    pub fn parse_schedule(base_url: &str, html: &str) -> Vec<ScheduleDay> {
+        let parser = HtmlParser::parse(html);
+        let mut days: Vec<ScheduleDay> = Vec::new();
+
+        let anchor_sel = match scraper::Selector::parse(".listupd .bs .bsx a[href]") {
+            Ok(s) => s,
+            Err(_) => return days,
+        };
+        let day_label_sel = match scraper::Selector::parse(".releases h3 span") {
+            Ok(s) => s,
+            Err(_) => return days,
+        };
+
+        for block in parser.select_all(".bixbox.schedulepage") {
+            let day = block
+                .select(&day_label_sel)
+                .next()
+                .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            let day = match day {
+                Some(d) => d,
+                None => continue,
+            };
+
+            let mut items: Vec<ScheduleItem> = Vec::new();
+            for anchor in block.select(&anchor_sel) {
+                let href = match anchor.value().attr("href") {
+                    Some(h) if !h.is_empty() => h,
+                    _ => continue,
+                };
+                let url = resolve_url(base_url, href);
+                if !url.contains("/seri/") {
+                    continue;
+                }
+
+                // Title: prefer the anchor's `title` attribute, fallback to `.tt` text.
+                let title = anchor
+                    .value()
+                    .attr("title")
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        scraper::Selector::parse(".tt").ok().and_then(|sel| {
+                            anchor
+                                .select(&sel)
+                                .next()
+                                .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
+                        })
+                    })
+                    .unwrap_or_default();
+                if title.is_empty() {
+                    continue;
+                }
+
+                let thumbnail = scraper::Selector::parse("img").ok().and_then(|sel| {
+                    anchor.select(&sel).next().and_then(|img| {
+                        img.value()
+                            .attr("data-src")
+                            .or_else(|| img.value().attr("src"))
+                            .map(|s| resolve_url(base_url, s))
+                    })
+                });
+
+                let episode = scraper::Selector::parse(".bt .sb").ok().and_then(|sel| {
+                    anchor
+                        .select(&sel)
+                        .next()
+                        .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
+
+                // Release time: the `.bt .epx` element carries a human label
+                // (e.g. "at 09:47" or "released") plus a `data-rlsdt` unix
+                // seconds timestamp (empty for already-released items).
+                let epx = scraper::Selector::parse(".bt .epx")
+                    .ok()
+                    .and_then(|sel| anchor.select(&sel).next());
+                let time_label = epx
+                    .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let release_at = epx
+                    .and_then(|el| el.value().attr("data-rlsdt"))
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| s.parse::<i64>().ok());
+
+                items.push(ScheduleItem {
+                    title,
+                    url,
+                    thumbnail,
+                    episode,
+                    time_label,
+                    release_at,
+                });
+            }
+
+            if !items.is_empty() {
+                days.push(ScheduleDay { day, items });
+            }
+        }
+
+        days
     }
 
     fn is_series_url(url: &str) -> bool {
@@ -401,5 +557,120 @@ impl SiteAdapter for AnichinAdapter {
             // Homepage or other archive — let deep extractor handle it
             Ok(vec![])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_schedule_groups_items_by_day_in_order() {
+        let html = r##"
+            <div class="bixbox schedulepage sch_monday">
+              <div class="releases"><h3><span>Monday</span></h3></div>
+              <div class="listupd">
+                <div class="bs">
+                  <div class="bsx">
+                    <a href="https://anichin.cafe/seri/peerless/" title="Peerless Series">
+                      <div class="bt">
+                        <span class='epx cndwn' data-cndwn='47658' data-rlsdt='1780972490'>at 02:34</span>
+                        <span class="sb Sub">7</span>
+                      </div>
+                      <div class="limit"><img src="https://cdn.example/peerless.jpg" width="200" height="300" /></div>
+                      <div class="tt">Peerless Fallback</div>
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="bixbox schedulepage sch_tuesday">
+              <div class="releases"><h3><span>Tuesday</span></h3></div>
+              <div class="listupd">
+                <div class="bs">
+                  <div class="bsx">
+                    <a href="https://anichin.cafe/seri/another/" title="Another Series">
+                      <div class="bt">
+                        <span class='epx cndwn' data-cndwn='-1200' data-rlsdt=''>released</span>
+                        <span class="sb Sub">??</span>
+                      </div>
+                      <div class="limit"><img data-src="https://cdn.example/another.jpg" /></div>
+                    </a>
+                  </div>
+                </div>
+                <div class="bs">
+                  <div class="bsx">
+                    <a href="https://anichin.cafe/not-a-series/" title="Skip Me">
+                      <div class="bt"><span class="sb">1</span></div>
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+        "##;
+
+        let days = AnichinAdapter::parse_schedule("https://anichin.cafe/schedule/", html);
+        assert_eq!(days.len(), 2);
+
+        assert_eq!(days[0].day, "Monday");
+        assert_eq!(days[0].items.len(), 1);
+        let monday = &days[0].items[0];
+        assert_eq!(monday.title, "Peerless Series");
+        assert_eq!(monday.url, "https://anichin.cafe/seri/peerless/");
+        assert_eq!(
+            monday.thumbnail.as_deref(),
+            Some("https://cdn.example/peerless.jpg")
+        );
+        assert_eq!(monday.episode.as_deref(), Some("7"));
+        assert_eq!(monday.time_label.as_deref(), Some("at 02:34"));
+        assert_eq!(monday.release_at, Some(1780972490));
+
+        // Tuesday keeps source order and skips the non-/seri/ link.
+        assert_eq!(days[1].day, "Tuesday");
+        assert_eq!(days[1].items.len(), 1);
+        let tuesday = &days[1].items[0];
+        assert_eq!(tuesday.title, "Another Series");
+        assert_eq!(tuesday.episode.as_deref(), Some("??"));
+        // Already-released items expose the label but an empty `data-rlsdt`
+        // parses to `None`.
+        assert_eq!(tuesday.time_label.as_deref(), Some("released"));
+        assert_eq!(tuesday.release_at, None);
+        assert_eq!(
+            tuesday.thumbnail.as_deref(),
+            Some("https://cdn.example/another.jpg")
+        );
+    }
+
+    #[test]
+    fn parse_schedule_title_falls_back_to_tt() {
+        let html = r##"
+            <div class="bixbox schedulepage sch_friday">
+              <div class="releases"><h3><span>Friday</span></h3></div>
+              <div class="listupd">
+                <div class="bs">
+                  <div class="bsx">
+                    <a href="https://anichin.cafe/seri/no-title-attr/">
+                      <div class="tt">Title From TT</div>
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+        "##;
+
+        let days = AnichinAdapter::parse_schedule("https://anichin.cafe/schedule/", html);
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].items[0].title, "Title From TT");
+        assert!(days[0].items[0].episode.is_none());
+        assert!(days[0].items[0].time_label.is_none());
+        assert!(days[0].items[0].release_at.is_none());
+    }
+
+    #[test]
+    fn parse_schedule_empty_for_garbage() {
+        assert!(
+            AnichinAdapter::parse_schedule("https://anichin.cafe/schedule/", "<html></html>")
+                .is_empty()
+        );
     }
 }

@@ -47,6 +47,14 @@ pub enum ContentModel {
     #[serde(rename = "novel_chapter")]
     NovelChapter(NovelChapter),
 
+    /// Movie / film (single embed player, e.g. LayarKaca21)
+    #[serde(rename = "movie")]
+    Movie(MovieDetail),
+
+    /// Adult anime post (nekopoi): streaming servers + download groups.
+    #[serde(rename = "nekopoi_post")]
+    NekopoiPost(NekopoiPost),
+
     #[serde(rename = "generic")]
     Generic(GenericContent),
 
@@ -325,7 +333,22 @@ pub struct CosplayPost {
     /// Unzip password if shown on the post
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unzip_password: Option<String>,
+    /// "Suggestions for you" — related posts the source page links to at the
+    /// bottom of the gallery. Surfaced so the client can render a small
+    /// recommendation row under the photos.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommendations: Vec<CosplayRecommendation>,
     pub url: String,
+}
+
+/// A single related-post suggestion scraped from a cosplay post page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CosplayRecommendation {
+    pub title: String,
+    /// Raw upstream post URL (opaque-encoded before leaving the API).
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
 }
 
 /// Light novel / web novel series metadata (novelid.org and similar).
@@ -385,7 +408,96 @@ pub struct NovelChapter {
     pub url: String,
 }
 
-/// Deep page extraction — comprehensive data captured from any HTML page.
+/// Movie / film detail (single embed player) — e.g. LayarKaca21 (lk21).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MovieDetail {
+    pub title: Option<String>,
+    pub synopsis: Option<String>,
+    pub poster: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    pub genres: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub countries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    /// Default streaming embed (the page's main player iframe).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_url: Option<String>,
+    /// Switchable player servers ("GANTI PLAYER": P2P / TURBOVIP / CAST / HYDRAX).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<MovieServer>,
+    /// "MOVIE TERKAIT" — related-movie suggestions from the detail page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<MovieRelated>,
+    /// External download portal link, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    pub url: String,
+}
+
+/// A switchable player server on a movie page (the "GANTI PLAYER" list).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MovieServer {
+    /// Machine name from `data-server` (e.g. "p2p", "turbovip", "cast", "hydrax").
+    pub name: String,
+    /// Human label (e.g. "P2P", "TURBOVIP").
+    pub label: String,
+    /// The wrapper embed URL (`playeriframe.sbs/iframe/<server>/<id>`).
+    pub embed_url: String,
+}
+
+/// A related-movie suggestion ("MOVIE TERKAIT").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MovieRelated {
+    pub title: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<String>,
+}
+
+/// Adult-anime release post (nekopoi): a standalone episode/release carrying
+/// several embeddable streaming servers, download links grouped by quality, and
+/// related-post suggestions. Adult content — gated behind the 18+ toggle on the
+/// client, like cosplay/doujin.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NekopoiPost {
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synopsis: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    /// Embeddable streaming servers (playmogo / streampoi / ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<MovieServer>,
+    /// Episode list (when this is a multi-episode series page rather than a
+    /// single video post). Each entry links to its own video post.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub episodes: Vec<MovieRelated>,
+    /// Download links grouped by quality.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloads: Vec<DownloadGroup>,
+    /// Related post suggestions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<MovieRelated>,
+    pub url: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeepPage {
     pub url: String,

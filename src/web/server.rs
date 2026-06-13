@@ -13,6 +13,7 @@
 //!   GET /api/v1/manga/chapter/{id}   -> manga chapter pages
 //!   GET /api/v1/donghua/{id}         -> donghua series (Anichin) — paged episode list
 //!   GET /api/v1/donghua/episode/{id} -> donghua episode + servers + downloads
+//!   GET /api/v1/donghua/schedule     -> donghua weekly release schedule (Anichin)
 //!   GET /api/v1/cosplay/{id}         -> cosplay post (Cosplaytele)
 //!   GET /api/v1/novel/{id}           -> novel series (NovelID) — handles
 //!                                       upstream-paginated chapter lists
@@ -61,13 +62,22 @@ pub fn build_router(state: ApiState, static_dir: &str) -> Router {
         .route("/api/v1/health", get(api::health))
         .route("/api/v1/info", get(api::info))
         .route("/api/v1/search", get(api::search))
+        .route("/api/v1/suggest", get(api::suggest))
+        .route("/api/v1/resolve", get(api::resolve))
         .route("/api/v1/manga/{id}", get(api::manga_series))
         .route("/api/v1/manga/chapter/{id}", get(api::manga_chapter))
         .route("/api/v1/donghua/{id}", get(api::donghua_series))
         .route("/api/v1/donghua/episode/{id}", get(api::donghua_episode))
+        .route("/api/v1/donghua/schedule", get(api::donghua_schedule))
         .route("/api/v1/anime/{id}", get(api::anime_series))
         .route("/api/v1/anime/episode/{id}", get(api::anime_episode))
         .route("/api/v1/anime-stream", get(api::anime_stream))
+        .route("/api/v1/lmanime/{id}", get(api::lmanime_series))
+        .route("/api/v1/lmanime/episode/{id}", get(api::lmanime_episode))
+        .route("/api/v1/lmanime-stream", get(api::lmanime_stream))
+        .route("/api/v1/movie/{id}", get(api::lk21_movie))
+        .route("/api/v1/movie-stream/{id}", get(api::movie_stream))
+        .route("/api/v1/nekopoi/{id}", get(api::nekopoi_post))
         .route("/api/v1/cosplay/{id}", get(api::cosplay_post))
         .route("/api/v1/cosplay-video", get(api::cosplay_video))
         .route("/api/v1/novel/{id}", get(api::novel_series))

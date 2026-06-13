@@ -73,11 +73,15 @@ pub trait SiteAdapter: Send + Sync {
 pub mod anichin;
 pub mod cosplaytele;
 pub mod donghua;
+pub mod lk21;
+pub mod lmanime;
 pub mod manga;
 pub mod mangaball;
+pub mod nekopoi;
 pub mod nhentai;
 pub mod novelid;
 pub mod otakudesu;
+pub mod otakudesufit;
 pub mod wordpress;
 
 /// Registry of site adapters
@@ -101,7 +105,11 @@ impl AdapterRegistry {
         registry.register(Box::new(novelid::NovelidAdapter::new()));
         registry.register(Box::new(cosplaytele::CosplayteleAdapter::new()));
         registry.register(Box::new(anichin::AnichinAdapter::new()));
+        registry.register(Box::new(otakudesufit::OtakudesufitAdapter::new()));
         registry.register(Box::new(otakudesu::OtakudesuAdapter::new()));
+        registry.register(Box::new(lmanime::LmanimeAdapter::new()));
+        registry.register(Box::new(lk21::Lk21Adapter::new()));
+        registry.register(Box::new(nekopoi::NekopoiAdapter::new()));
         registry.register(Box::new(wordpress::WordPressAdapter::new()));
         registry.register(Box::new(manga::MangaAdapter::new()));
         registry.register(Box::new(donghua::DonghuaAdapter::new()));

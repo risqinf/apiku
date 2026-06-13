@@ -7,6 +7,8 @@ output.json
 *.log
 
 # --- IDE / editor metadata (local only) ---
+.helix/
+.hx/
 .kiro/
 .vscode/
 .idea/
@@ -22,6 +24,12 @@ desktop.ini
 .env
 .env.local
 config.local.toml
+# Auto-generated opaque-ID signing secret (keeps IDs/image URLs stable across
+# restarts). Per-deployment; never commit.
+.apiku-secret
+/.apiku/
+/.apiku-test/
+.apiku-test-id
 
 # --- Operator-specific static files (verification, ads, sitemaps) ---
 # Keep the directory + its docs/robots, but don't commit per-deployment files.

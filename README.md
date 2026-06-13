@@ -50,13 +50,14 @@
 12. [Browser fingerprint rotation](#browser-fingerprint-rotation)
 13. [Code examples](#code-examples)
 14. [Adaptive tuning](#adaptive-tuning)
-15. [Security model](#security-model)
-16. [Configuration](#configuration)
-17. [Branding & customization](#branding--customization)
-18. [Deployment](#deployment)
-19. [Logging](#logging)
-20. [Project layout](#project-layout)
-21. [Roadmap](#roadmap)
+15. [Benchmarks](#benchmarks)
+16. [Security model](#security-model)
+17. [Configuration](#configuration)
+18. [Branding & customization](#branding--customization)
+19. [Deployment](#deployment)
+20. [Logging](#logging)
+21. [Project layout](#project-layout)
+22. [Roadmap](#roadmap)
 
 ---
 
@@ -541,7 +542,7 @@ Example: `mbsijk.aHR0cHM6Ly9tYW5nYWJhbGwubmV0L3RpdGxlLWRldGFpbC8.J9k1Nz5pQq3v7L2
 - **payload** — base64url-encoded raw URL
 - **mac** — first 16 bytes of `HMAC-SHA256(secret, header || "." || payload)`, base64url-encoded (~22 chars, 128-bit security)
 
-Constant-time comparison rejects any tampering. The server secret is regenerated on every restart unless `APIKU_SECRET` is set, in which case IDs remain stable across restarts.
+Constant-time comparison rejects any tampering. By default the server **persists an auto-generated secret** (in `$APIKU_DATA_DIR/secret`, else `$HOME/.apiku/secret`) so opaque IDs — and the signed image-proxy URLs — stay valid across restarts, keeping saved favorites / history and their thumbnails working. Set `APIKU_SECRET` to override (recommended for multi-instance deployments so every instance shares one secret).
 
 ---
 
@@ -859,6 +860,32 @@ INFO  apiku::server            server listening addr=127.0.0.1:3000
 
 ---
 
+## Benchmarks
+
+Hot-path micro-benchmarks and end-to-end HTTP throughput. Full methodology,
+tables, and reproduction commands are in **[BENCHMARKS.md](BENCHMARKS.md)**.
+
+Measured on an AMD Ryzen 3 7320U (4c/8t), 7 GiB RAM, `--release`:
+
+| Path | Result |
+|---|---:|
+| Opaque ID `encode` / `decode` (HMAC-SHA256) | 952 ns / 570 ns |
+| Image-URL `sign` / `verify` | 307 ns / 325 ns |
+| Browser fingerprint pick (`for_url`) | 110 ns |
+| HTML parse + extract (30-card listing) | 444 µs |
+| `GET /api/v1/health` throughput (c=50) | **15,270 req/s** (p50 2.8 ms) |
+| `GET /img` warm cache hit (c=50) | **24,647 req/s**, 1.1 GiB/s (p50 1.7 ms) |
+
+The crypto envelope is sub-microsecond per item, so scrape latency is
+network-bound rather than CPU-bound; the in-memory image cache turns repeat
+cover/thumbnail loads (~124 ms cold here, up to seconds on slow upstreams) into
+~1.7 ms warm hits.
+
+Reproduce with `cargo bench` (Criterion) and `oha` (see
+[BENCHMARKS.md](BENCHMARKS.md)).
+
+---
+
 ## Security model
 
 ### Opaque IDs
@@ -884,7 +911,7 @@ INFO  apiku::server            server listening addr=127.0.0.1:3000
 
 ### Hardening recommendations for production
 
-- Set `APIKU_SECRET=<long-random>` in env so IDs survive restarts
+- Set `APIKU_SECRET=<long-random>` so every instance shares one signing secret (IDs are stable across restarts by default via a persisted secret, but multiple instances each generate their own unless this is set)
 - Run behind a reverse proxy (nginx / caddy) for TLS, IP rate limiting, access logs
 - Restrict `Access-Control-Allow-Origin` instead of `*`
 - Add HTTP basic auth or API keys at the reverse proxy layer if exposed publicly
