@@ -5,30 +5,33 @@
 [![Live](https://img.shields.io/website?url=https%3A%2F%2Fapi.farellvpn.engineer%2Fapi%2Fv1%2Fhealth&label=api.farellvpn.engineer)](https://api.farellvpn.engineer)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> RESTful scraping API for **Mangaball**, **Anichin**, **Otakudesu**, **Cosplaytele**, **nhentai**, and **NovelID** — one HTTP service that other developers can build manga readers, anime & donghua players, cosplay galleries, doujinshi browsers, and novel readers against, without ever seeing the upstream URLs.
+> RESTful scraping API for **Mangaball**, **Anichin**, **Otakudesu** (.fit + .blog), **lmanime**, **LayarKaca21**, **Cosplaytele**, **nhentai**, **NovelID**, and **NekoPoi** — one HTTP service that other developers can build manga readers, anime / donghua / movie players, cosplay galleries, doujinshi browsers, and novel readers against, without ever seeing the upstream URLs.
 
 - **Live demo:** <https://api.farellvpn.engineer> (hosted on AWS — same binary, same endpoints)
 - **Repo:** <https://github.com/risqinf/apiku>
 - **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
 - **Author:** [@risqinf](https://github.com/risqinf)
 - **License:** MIT
-- **Version:** 0.2.4 (see `Cargo.toml`)
+- **Version:** 0.2.6 (see `Cargo.toml`)
 
 ---
 
 ## Highlights
 
-- **One API, six providers.** Anime, donghua, manga/komik, cosplay archives, doujinshi catalogues, and Indonesian novels behind a uniform JSON envelope.
-- **Opaque IDs.** Resource IDs are HMAC-SHA256-signed tokens. Consumers never see upstream URLs.
+- **One API, many providers.** Anime (Otakudesu .fit + .blog merged), English-subbed anime/donghua (lmanime), donghua (Anichin), movies (LayarKaca21), manga/komik (Mangaball), cosplay archives (Cosplaytele), doujinshi (nhentai), Indonesian novels (NovelID), and adult anime (NekoPoi) — all behind one uniform JSON envelope.
+- **Opaque IDs.** Resource IDs are HMAC-SHA256-signed tokens. Consumers never see upstream URLs. The signing secret is **persisted by default**, so IDs (and the signed image URLs) stay valid across restarts.
 - **Image proxy.** Every cover, page and thumbnail is rewritten to a signed local proxy. Source CDNs stay hidden.
-- **Cosplay video → HLS, server-resolved.** Cosplaytele videos are served via an encrypted third-party embed (`cossora.stream`) that blocks plain iframes. apiku fetches the embed with the right Referer, **decrypts the real `.m3u8` URL server-side (AES-256-CBC)**, and hands the client a playable HLS stream. Only the tiny playlists are proxied — the heavy `.ts` segments stream **directly from the CDN to the client** to save bandwidth. No iframe embeds anywhere.
-- **High-precision search.** Cosplaytele's loose WordPress search and its recommendation carousels are stripped out, then results are relevance-filtered so a query like `xiaoyaoyaoyao` returns only that cosplayer. Cosplayer names and doujin tags are **clickable** and jump to a filtered search.
+- **Movie & adult-anime players, server-resolved.** LayarKaca21 exposes switchable players (P2P / TURBOVIP / CAST / HYDRAX): the P2P chain is **sniffed server-side to a proxied HLS stream** (the segment CDN rotates its host on every chunk — a private-host SSRF guard keeps it working), the rest are unwrapped to embeddable inner players. NekoPoi handles both single video posts and multi-episode series pages.
+- **Cosplay video → HLS, server-resolved.** Cosplaytele videos are served via an encrypted third-party embed (`cossora.stream`) that blocks plain iframes. apiku fetches the embed with the right Referer, **decrypts the real `.m3u8` URL server-side (AES-256-CBC)**, and hands the client a playable HLS stream. Only the tiny playlists are proxied — the heavy `.ts` segments stream **directly from the CDN to the client** to save bandwidth.
+- **Resumable library.** Favorites and browsing history are keyed by a **secret-independent stable content key** (they survive ID rotation and restarts), track reading/watching **progress**, and a history entry **resumes straight to your last episode/chapter**. A `/api/v1/resolve` endpoint re-signs a known provider URL to self-heal any stale saved ID.
+- **High-precision search.** Cosplaytele's loose WordPress search and its recommendation carousels are stripped out, then results are relevance-filtered. Cosplayer names and doujin tags are **clickable** and jump to a filtered search; nhentai surfaces cumulative `[parody] [tag]` suggestions.
 - **Browser fingerprint rotation.** Outbound requests pick a coherent identity (Windows/Chrome, macOS/Safari, Android/Chrome, iPhone/Safari, Linux/Firefox, ...) per upstream URL — coupled with proper Sec-CH-UA, Sec-Fetch-* and Referer spoofing so origin checks and hotlink protection see a real browser visiting the source site.
 - **Adaptive runtime.** CPU and RAM are detected at startup; tokio threads, HTTP concurrency, and cache sizes are tuned automatically.
+- **Benchmarked.** Criterion micro-benchmarks for the per-request hot paths (opaque crypto, fingerprint, HTML parse) plus end-to-end throughput — see [Benchmarks](#benchmarks) / [BENCHMARKS.md](BENCHMARKS.md).
 - **Client-side prefetch.** The web app warms the next likely detail/episode/chapter/page during idle time, so navigation feels instant.
 - **Single-flight cache.** Concurrent requests for the same URL collapse into one upstream fetch.
 - **Browse + search + detail + paged chapter list** for every provider.
-- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform with a modern UI: animated aurora + color-flow grid background, home rows, per-provider browse with feed filters, search with per-source filter chips, donghua player with server switching, manga/doujin reader with fullscreen, novel text reader, cosplay galleries with inline HLS video, and per-detail recommendations. Manga detail pages **group chapters by language** with one-tap language tabs that persist across pagination. Includes a responsive navbar (desktop bar + mobile drawer with real-time toggle switches), light/dark theme toggle, an in-app **API Docs** page, an inline **API Explorer** with copy-ready multi-language code samples, and an **18+ toggle** (clear age-verification modal) that hides the adult providers (Cosplay, Doujin) until explicitly enabled.
+- **Consumer web app at `/`.** A dependency-free SPA streaming/reading platform with a modern UI: animated aurora + color-flow grid background, home rows, per-provider browse with feed filters, search with per-source filter chips, anime/donghua player with server switching, a movie player with a server switcher, manga/doujin reader with fullscreen, novel text reader, cosplay galleries with inline HLS video, and per-detail recommendations. Manga detail pages **group chapters by language** with one-tap language tabs that persist across pagination. Includes a responsive navbar (desktop bar + mobile drawer with real-time toggle switches), light/dark theme toggle, an in-app **API Docs** page, an inline **API Explorer** with copy-ready multi-language code samples, and an **18+ toggle** (clear age-verification modal) that hides the adult providers (Cosplay, Doujin, Hentai) until explicitly enabled.
 - **Configurable branding, no recompile.** Site name, tagline, logo, footer, ad slots, and SEO/ad-network verification snippets are driven by a `[web]` block in `config.toml` and/or environment variables — see [Branding & customization](#branding--customization). Drop a `logo.*` into `public/` and it's auto-detected.
 - **Developer API console at `/tester`.** Live request playground, multi-language code examples, full reference, security notes.
 
@@ -159,21 +162,28 @@ Base URL: `http://127.0.0.1:3000` (local) — base path: `/api/v1`.
 | `GET` | `/api/v1/manga/chapter/{id}` | Manga chapter pages |
 | `GET` | `/api/v1/donghua/{id}?page=N&size=N` | Donghua series detail (Anichin) — episode list paginated |
 | `GET` | `/api/v1/donghua/episode/{id}` | Donghua episode (servers + downloads) |
-| `GET` | `/api/v1/anime/{id}` | Anime series detail (Otakudesu) — full metadata + episode list |
+| `GET` | `/api/v1/anime/{id}` | Anime series detail (Otakudesu .fit/.blog) — full metadata + episode list |
 | `GET` | `/api/v1/anime/episode/{id}` | Anime episode — quality-grouped streaming mirrors + downloads |
 | `GET` | `/api/v1/anime-stream?id=...` | Resolve an anime mirror token into a playable embed URL |
+| `GET` | `/api/v1/lmanime/{id}` | English-subbed anime/donghua series detail (lmanime) |
+| `GET` | `/api/v1/lmanime/episode/{id}` | lmanime episode — streaming mirrors + downloads |
+| `GET` | `/api/v1/lmanime-stream?id=...` | Resolve an lmanime mirror token into a playable embed URL |
+| `GET` | `/api/v1/movie/{id}` | Movie detail (LayarKaca21) — switchable servers + related movies |
+| `GET` | `/api/v1/movie-stream/{id}?server=...` | Resolve a movie server: proxied HLS (P2P) or an embeddable inner player |
 | `GET` | `/api/v1/cosplay/{id}` | Cosplay post (gallery + resolved video + downloads) |
 | `GET` | `/api/v1/cosplay-video?p=...&s=...` | Resolve a Cosplaytele embed into a playable HLS stream URL |
 | `GET` | `/api/v1/novel/{id}?page=N&size=N` | Novel series detail (NovelID) — chapter list paginated, supports upstream-paginated novels with thousands of chapters |
 | `GET` | `/api/v1/novel/chapter/{id}` | Novel chapter (text body, plus prev/next IDs) |
 | `GET` | `/api/v1/nhentai/{id}` | nhentai gallery (browser-fingerprint spoofed) |
 | `GET` | `/api/v1/nhentai/chapter/{id}` | nhentai gallery as a chapter (proxied page list) |
+| `GET` | `/api/v1/nekopoi/{id}` | NekoPoi post (18+): streaming servers + downloads, or a series episode list |
+| `GET` | `/api/v1/resolve?source=...&kind=...&u=...` | Re-sign a known provider URL into a fresh opaque ID (saved-item self-heal) |
 | `GET` | `/img?p={payload}&s={signature}` | Signed image proxy |
-| `GET` | `/hls?p={payload}&s={signature}` | HLS playlist proxy (segments stream direct from CDN to the client) |
+| `GET` | `/hls?p={payload}&s={signature}` | HLS playlist + segment proxy |
 
 Every response carries a generated `X-Request-Id` header echoed in `meta.request_id`.
 
-Providers are: `mangaball` | `anichin` | `otakudesu` | `cosplaytele` | `nhentai` | `novelid`.
+Providers are: `mangaball` | `anichin` | `anime` (otakudesu) | `lmanime` | `movie` (lk21) | `cosplaytele` | `nhentai` | `novelid` | `nekopoi`.
 
 ---
 
@@ -185,10 +195,13 @@ Providers are: `mangaball` | `anichin` | `otakudesu` | `cosplaytele` | `nhentai`
 |---|---|
 | `mangaball` | `home` (featured), `popular`, `latest`, `recommend` (page-sliced from a single API response, `size` defaults to 30, max 60) |
 | `anichin` | `home` (= latest update), `popular`, `rating`, `title` (A-Z), `latest-added` |
-| `otakudesu` | `ongoing`, `complete`, or any genre slug (`action`, `romance`, `comedy`, `fantasy`, `adventure`, `drama`, ...) |
-| `cosplaytele` | `home` (latest), `popular` / `hot`, or any category slug (e.g. `genshin-impact`, `azur-lane`) |
+| `anime` (otakudesu) | `ongoing`, `complete`, or any genre slug — merges otakudesu.fit + .blog and dedups the same series listed under different romanizations |
+| `lmanime` | `ongoing`, `all` (A-Z), or any genre slug (`action`, `fantasy`, `romance`, `isekai`, `cultivation`, ...) |
+| `movie` (lk21) | `populer`, `latest`, `rating`, `release` (by year), `nontondrama` (series), or any genre slug (`action`, `drama`, `horror`, ...) |
+| `cosplaytele` | `home` (latest), or any category slug (e.g. `genshin-impact`, `azur-lane`) |
 | `nhentai` | `home` (recent), `popular-today`, `popular-week`, `popular` (all-time) |
 | `novelid` | `home` (semua), `popular` (alias of `tamat`), or any genre slug: `novel-translate`, `fantasi`, `romantis`, `religi`, `motivasi`, `horror`, `aksi`, `komedi`, `sastra`, `novel-anak` |
+| `nekopoi` (18+) | `latest`, `hentai`, `3d`, `2d`, `jav`, `jav-cosplay`, or any `category:<slug>` |
 
 Pagination is page-based: `?page=2`, `?page=3`, ...
 
@@ -215,10 +228,11 @@ curl 'http://127.0.0.1:3000/api/v1/browse/mangaball?feed=popular&size=30&page=1'
 
 `GET /api/v1/search?q={query}&source={source}&page={n}`
 
-- `source`: `all` (default) | `manga` | `donghua` | `anime` | `cosplay` | `nhentai` | `novel`
+- `source`: `all` (default) | `manga` | `donghua` | `anime` | `lmanime` | `movie` | `cosplay` | `nhentai` | `novel` | `nekopoi`
 - `page`: 1-based, applies to providers that support upstream pagination
 - nhentai accepts inline `[tag]` syntax — e.g. `?q=Genshin+Impact+%5Bfull+color%5D&source=nhentai`
 - results are relevance-ranked (closest title matches first) across all providers
+- `nekopoi` (18+) is excluded from the default `all` search and only returned when requested explicitly
 
 ```bash
 curl 'http://127.0.0.1:3000/api/v1/search?q=one+piece&source=manga'
