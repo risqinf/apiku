@@ -13,6 +13,8 @@
 
 pub mod api;
 pub mod cossora;
+pub mod dramabox;
+pub mod nekopoi_stream;
 pub mod search;
 pub mod server;
 pub mod tester;

@@ -12,16 +12,17 @@
 - **Releases:** <https://github.com/risqinf/apiku/releases> (pre-built binaries for Linux x86_64 / ARM64, macOS Intel / Apple Silicon, Windows x86_64 / ARM64)
 - **Author:** [@risqinf](https://github.com/risqinf)
 - **License:** MIT
-- **Version:** 0.2.6 (see `Cargo.toml`)
+- **Version:** 0.2.7 (see `Cargo.toml`)
 
 ---
 
 ## Highlights
 
-- **One API, many providers.** Anime (Otakudesu .fit + .blog merged), English-subbed anime/donghua (lmanime), donghua (Anichin), movies (LayarKaca21), manga/komik (Mangaball), cosplay archives (Cosplaytele), doujinshi (nhentai), Indonesian novels (NovelID), and adult anime (NekoPoi) — all behind one uniform JSON envelope.
+- **One API, many providers.** Anime (Otakudesu .fit + .blog merged), English-subbed anime/donghua (lmanime), donghua (Anichin), movies (LayarKaca21), manga/komik (Mangaball), cosplay archives (Cosplaytele), doujinshi (nhentai), Indonesian novels (NovelID), adult anime (NekoPoi), and short vertical dramas (DramaWave — **experimental**) — all behind one uniform JSON envelope.
 - **Opaque IDs.** Resource IDs are HMAC-SHA256-signed tokens. Consumers never see upstream URLs. The signing secret is **persisted by default**, so IDs (and the signed image URLs) stay valid across restarts.
 - **Image proxy.** Every cover, page and thumbnail is rewritten to a signed local proxy. Source CDNs stay hidden.
-- **Movie & adult-anime players, server-resolved.** LayarKaca21 exposes switchable players (P2P / TURBOVIP / CAST / HYDRAX): the P2P chain is **sniffed server-side to a proxied HLS stream** (the segment CDN rotates its host on every chunk — a private-host SSRF guard keeps it working), the rest are unwrapped to embeddable inner players. NekoPoi handles both single video posts and multi-episode series pages.
+- **Movie & adult-anime players, server-resolved + ad-blocked.** LayarKaca21 exposes switchable players (P2P / TURBOVIP / CAST / HYDRAX): the P2P chain is **sniffed server-side to a proxied HLS stream** (the segment CDN rotates its host on every chunk — a private-host SSRF guard keeps it working), the rest are unwrapped to embeddable inner players. NekoPoi handles both single video posts and multi-episode series, and **never iframes the ad-laden third-party players**: StreamWish/Filemoon embeds are unpacked to a proxied **HLS** stream and DoodStream embeds to a direct **MP4** (streamed through a Range-capable `/media` proxy), so playback is inline and free of the pop-up / forced-new-tab ads those hosts inject. Hosts that can only be iframed are offered as a clean "open in a new tab" action instead of being embedded.
+- **OpenSSL transport.** The HTTP client uses the system OpenSSL stack (native-tls); static / cross-compiled release targets vendor OpenSSL so the binaries stay self-contained. Some WAF-protected DoodStream CDNs fingerprint-block non-browser TLS, so for those specific hosts apiku shells out to the system `curl` (also OpenSSL) — present on essentially every VPS — to resolve and stream the file.
 - **Cosplay video → HLS, server-resolved.** Cosplaytele videos are served via an encrypted third-party embed (`cossora.stream`) that blocks plain iframes. apiku fetches the embed with the right Referer, **decrypts the real `.m3u8` URL server-side (AES-256-CBC)**, and hands the client a playable HLS stream. Only the tiny playlists are proxied — the heavy `.ts` segments stream **directly from the CDN to the client** to save bandwidth.
 - **Resumable library.** Favorites and browsing history are keyed by a **secret-independent stable content key** (they survive ID rotation and restarts), track reading/watching **progress**, and a history entry **resumes straight to your last episode/chapter**. A `/api/v1/resolve` endpoint re-signs a known provider URL to self-heal any stale saved ID.
 - **High-precision search.** Cosplaytele's loose WordPress search and its recommendation carousels are stripped out, then results are relevance-filtered. Cosplayer names and doujin tags are **clickable** and jump to a filtered search; nhentai surfaces cumulative `[parody] [tag]` suggestions.
@@ -177,13 +178,16 @@ Base URL: `http://127.0.0.1:3000` (local) — base path: `/api/v1`.
 | `GET` | `/api/v1/nhentai/{id}` | nhentai gallery (browser-fingerprint spoofed) |
 | `GET` | `/api/v1/nhentai/chapter/{id}` | nhentai gallery as a chapter (proxied page list) |
 | `GET` | `/api/v1/nekopoi/{id}` | NekoPoi post (18+): streaming servers + downloads, or a series episode list |
+| `GET` | `/api/v1/nekopoi-stream?p=...&s=...` | Resolve a NekoPoi player embed to an inline stream (`mp4`/`hls`) or an `iframe` fallback |
+| `GET` | `/api/v1/drama/{id}` | **Experimental** — Drama / drachin (DramaWave) detail + episodes (HLS) |
 | `GET` | `/api/v1/resolve?source=...&kind=...&u=...` | Re-sign a known provider URL into a fresh opaque ID (saved-item self-heal) |
 | `GET` | `/img?p={payload}&s={signature}` | Signed image proxy |
 | `GET` | `/hls?p={payload}&s={signature}` | HLS playlist + segment proxy |
+| `GET` | `/media?p={payload}&s={signature}` | Range-capable media (mp4) streaming proxy for IP-locked CDN files |
 
 Every response carries a generated `X-Request-Id` header echoed in `meta.request_id`.
 
-Providers are: `mangaball` | `anichin` | `anime` (otakudesu) | `lmanime` | `movie` (lk21) | `cosplaytele` | `nhentai` | `novelid` | `nekopoi`.
+Providers are: `mangaball` | `anichin` | `anime` (otakudesu) | `lmanime` | `movie` (lk21) | `cosplaytele` | `nhentai` | `novelid` | `nekopoi` | `dramabox`/`drama` (drachin — experimental).
 
 ---
 
@@ -202,6 +206,7 @@ Providers are: `mangaball` | `anichin` | `anime` (otakudesu) | `lmanime` | `movi
 | `nhentai` | `home` (recent), `popular-today`, `popular-week`, `popular` (all-time) |
 | `novelid` | `home` (semua), `popular` (alias of `tamat`), or any genre slug: `novel-translate`, `fantasi`, `romantis`, `religi`, `motivasi`, `horror`, `aksi`, `komedi`, `sastra`, `novel-anak` |
 | `nekopoi` (18+) | `latest`, `hentai`, `3d`, `2d`, `jav`, `jav-cosplay`, or any `category:<slug>` |
+| `dramabox` / `drama` (experimental) | `latest` |
 
 Pagination is page-based: `?page=2`, `?page=3`, ...
 
@@ -550,7 +555,7 @@ Every resource ID returned by the API is HMAC-SHA256 signed.
 
 Example: `mbsijk.aHR0cHM6Ly9tYW5nYWJhbGwubmV0L3RpdGxlLWRldGFpbC8.J9k1Nz5pQq3v7L2HjT7M5w`
 
-- **source** — `mb` (mangaball), `ac` (anichin), `ct` (cosplaytele), `nh` (nhentai), `nv` (novelid)
+- **source** — `mb` (mangaball), `ac` (anichin), `ct` (cosplaytele), `nh` (nhentai), `nv` (novelid), `od` (otakudesu .blog), `of` (otakudesu .fit), `lm` (lmanime), `lk` (lk21 movies), `np` (nekopoi), `db` (drama / drachin)
 - **kind** — `s` (series), `i` (item: chapter or episode), `p` (post)
 - **nonce** — 3 random base32-ish chars to prevent identical IDs for the same URL
 - **payload** — base64url-encoded raw URL
@@ -578,6 +583,8 @@ Four layers of defence:
    - `nhentai.net`, `nhentai.xxx`, `nhentai.to`, `i1..i4.nhentai.net`, `t1..t4.nhentai.net`
    - `novelid.org` and the wp.com mirror it uses
    - `otakudesu.blog` and its mirror domains (anime covers)
+   - lmanime, LayarKaca21 poster CDNs, and NekoPoi (`nekopoi.care` + its wp/cdn subdomains)
+   - DramaWave / `mydramawave.com` cover + poster CDNs (drama, experimental)
 3. **Referer spoofing** — outgoing requests carry the source domain as `Referer` to bypass hotlink protection.
 4. **Browser fingerprint rotation** — every outgoing image request applies a coherent browser identity (User-Agent, Sec-CH-UA, Sec-Fetch-* tailored for an `<img>` request, narrow image-Accept) picked deterministically per upstream URL.
 
@@ -917,6 +924,13 @@ Reproduce with `cargo bench` (Criterion) and `oha` (see
 - Browser fingerprint applied per request
 - Long-lived `Cache-Control` for browser caching
 
+### HLS / media proxy
+
+- `/hls` and `/media` URLs are HMAC-signed and verified per request (same scheme as the image proxy)
+- An SSRF guard refuses loopback / private / link-local / ULA / CGNAT targets and internal hostnames — only public hosts are fetched (the streaming CDNs rotate hosts, so a static allowlist is impractical there)
+- `/media` is a Range-capable streaming proxy used for IP-locked CDN files (e.g. NekoPoi DoodStream mp4); it streams without buffering the whole file
+- Third-party ad players are **never** iframed by the NekoPoi UI — only server-resolved clean streams play inline, eliminating pop-up / new-tab ad vectors
+
 ### Rate limiting
 
 - Per-domain delay (default 400 ms in server mode)
@@ -1032,6 +1046,7 @@ The reference deployment runs on AWS at <https://api.farellvpn.engineer>. Archit
 - **Domain:** `api.farellvpn.engineer` → AWS via Route 53 / external DNS provider
 - **Logs:** systemd journald (`apiku --log-format json --log-file /var/log/apiku/apiku.log`)
 - **Image proxy:** the host allowlist already covers every upstream CDN we use, so no extra firewall rules are needed
+- **Runtime dependency:** the system **`curl`** binary must be on `PATH` (it ships on virtually every Linux/macOS host). It is used only to resolve + stream NekoPoi DoodStream players, whose CDNs WAF-block non-browser TLS. Everything else uses the in-process OpenSSL client. If `curl` is missing those specific servers simply degrade to an "open in a new tab" action.
 
 ### Suggested systemd unit
 
@@ -1070,6 +1085,16 @@ server {
         proxy_set_header Host $host;
         proxy_buffering on;
         proxy_cache_valid 200 1d;
+    }
+
+    # Streaming proxies (HLS playlists/segments + Range-capable mp4): disable
+    # buffering so large media streams straight through without being spooled.
+    location ~ ^/(hls|media)$ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_request_buffering off;
     }
 
     location / {
@@ -1167,14 +1192,20 @@ src/
 │   ├── webapp.rs      Consumer streaming/reading SPA shell
 │   ├── tester.rs      Developer API console (maud)
 │   ├── search.rs      Cross-provider search abstraction + relevance ranking
-│   └── cossora.rs     Cosplaytele video resolver (AES-256-CBC decrypt -> HLS)
+│   ├── cossora.rs     Cosplaytele video resolver (AES-256-CBC decrypt -> HLS)
+│   ├── nekopoi_stream.rs  NekoPoi embed resolver (DoodStream -> mp4, StreamWish -> HLS)
+│   └── dramabox.rs    Drama / drachin (DramaWave) client (AES-128-CBC + OAuth) — experimental
 └── adapters/
     ├── mod.rs         SiteAdapter trait + registry
     ├── mangaball.rs   Mangaball SPA adapter (multi-step API + browse search_types)
     ├── anichin.rs     Anichin donghua streaming adapter (HTML + browse orders)
     ├── otakudesu.rs   Otakudesu anime streaming adapter (HTML + AJAX mirror resolver + genre feeds)
+    ├── otakudesufit.rs Otakudesu .fit mirror adapter (merged with .blog)
+    ├── lmanime.rs     lmanime English-subbed anime/donghua adapter
+    ├── lk21.rs        LayarKaca21 movie adapter (multi-server P2P HLS + iframe players)
     ├── cosplaytele.rs Cosplaytele cosplay archive adapter (HTML + categories)
     ├── nhentai.rs     nhentai doujinshi adapter (JSON API + sharded CDN + popular feeds)
+    ├── nekopoi.rs     NekoPoi adult-anime adapter (18+: posts, series, servers, downloads)
     └── novelid.rs     NovelID Indonesian novel adapter (HTML, upstream-paginated chapter lists)
 ```
 
@@ -1186,20 +1217,25 @@ Planned work, roughly in priority order. Contributions and suggestions welcome v
 
 ### Next up
 
-- [ ] **Nekopoi** — add the Nekopoi provider (adult anime / hentai streaming) behind the 18+ toggle, reusing the existing HLS resolver + episode/mirror player pipeline. **This is the next major target.**
+- [ ] **Drama / drachin (DramaWave) — experimental, in testing.** A short-vertical-drama provider backed by the MyDramaWave app API (AES-128-CBC encrypted request/response bodies + anonymous OAuth flow, fully reverse-engineered). Browse + detail + HLS playback work in live testing, but it is **not yet considered stable / done** — episode coverage is limited to the free episodes the share API exposes, and the flow still needs hardening before it graduates. Wired behind the **Drama** nav entry for now.
+- [ ] More providers (additional manga / donghua / novel / drama sources) behind the same envelope.
 
 ### Backlog
 
-- [ ] More providers (additional manga / donghua / novel sources) behind the same envelope.
-- [ ] Watch/read history & resume (client-side, then optional sync).
-- [ ] Favorites / bookmarks with import-export.
 - [ ] Server-rendered meta tags per detail page for richer link previews & SEO.
-- [ ] Optional API-key / rate-tier layer for public deployments.
+- [ ] Optional API-key / rate-tier + inbound rate limiting for public deployments.
 - [ ] PWA: offline shell + installable web app.
 - [ ] More language samples and an OpenAPI spec for the Explorer.
 
 ### Done
 
+- [x] **NekoPoi (18+) with ad-blocking inline playback (0.2.7)** — adult-anime / hentai provider behind the 18+ toggle: single video posts and multi-episode series, downloads, and related posts. Streaming embeds are **cracked server-side to a clean, proxied inline stream** instead of iframing the ad-laden third-party players: **StreamWish/Filemoon → HLS** (unpacked from the packed JWPlayer config) and **DoodStream → direct MP4** (via the `pass_md5` chain, streamed through a Range-capable `/media` proxy). Hosts that can only be iframed are never embedded — they're offered as a clean "open in a new tab" action — so the player no longer leaks pop-ups, pop-unders, or forced-new-tab ad redirects.
+- [x] **Movies (LayarKaca21) (0.2.6)** — switchable players (P2P / TURBOVIP / CAST / HYDRAX); the P2P chain is sniffed server-side into a proxied HLS stream, related movies included.
+- [x] **English-subbed anime/donghua (lmanime) (0.2.6)** and **Anime (Otakudesu .fit + .blog merged) (0.2.6)** with word-split dedup of the same series across romanizations.
+- [x] **Resumable library (0.2.6)** — favorites + browsing history keyed by a secret-independent stable content key (survive ID rotation / restarts), tracking progress and resuming straight to the last episode/chapter, plus `/api/v1/resolve` self-heal for stale saved IDs.
+- [x] **Persisted opaque secret (0.2.6)** — auto-generated and stored on disk so opaque IDs + signed image URLs stay valid across restarts.
+- [x] **Benchmarks (0.2.6)** — Criterion micro-benchmarks for the per-request hot paths plus end-to-end throughput; see [BENCHMARKS.md](BENCHMARKS.md).
+- [x] **OpenSSL (native-tls) transport (0.2.7)** — the HTTP client uses the system OpenSSL stack (rustls removed) for broader WAF compatibility; static/cross targets vendor OpenSSL so release binaries stay self-contained.
 - [x] **Instant client-side navigation (0.2.4)** — the app shell (header / nav / drawer / footer) is built once and persists; navigation only swaps the content area instead of rebuilding the whole page, so moving between pages no longer flashes like a reload. Detail/watch/read pages render from a hover/touch-warmed cache with no spinner when the data is already in hand, and a 140 ms GPU-only fade keeps swaps smooth.
 - [x] **Performance pass for low-end devices (0.2.3)** — lightweight static background (no animated orbs / blur / blend modes), automatic "lite mode" on weak hardware (<=2 GiB RAM / <=2 cores, data-saver, 2G, or reduced-motion) that disables animations and background prefetch, plus a manual toggle. Targets a 2008 PC or a 2015 phone.
 - [x] **Tidier project layout (0.2.3)** — front-end assets split into `assets/webapp` + `assets/tester`; HTTP-serving code grouped under `src/web`, kept separate from the engine and adapters.

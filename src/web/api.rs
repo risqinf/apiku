@@ -1191,6 +1191,7 @@ async fn run_search(
         "lmanime" | "lm" => vec![SearchSource::Lmanime],
         "movie" | "lk21" | "film" => vec![SearchSource::Lk21],
         "nekopoi" | "hentai" => vec![SearchSource::Nekopoi],
+        "dramabox" | "drama" | "drachin" => vec![SearchSource::Dramabox],
         "all" => vec![
             SearchSource::Mangaball,
             SearchSource::Anichin,
@@ -1496,6 +1497,30 @@ async fn run_single_search(
             has_next,
         });
     }
+    if matches!(source, SearchSource::Dramabox) {
+        // DramaBox keyword search hits its app JSON API.
+        let cards = crate::web::dramabox::search(state, query).await?;
+        let items: Vec<SearchResultItem> = cards
+            .into_iter()
+            .map(|c| SearchResultItem {
+                source: "dramabox".to_string(),
+                title: c.title,
+                url: crate::web::dramabox::book_url(&c.book_id),
+                thumbnail: c.cover,
+                kind: Some("drama".to_string()),
+                snippet: None,
+                tags: c.tags,
+                cosplayer: None,
+                character: None,
+                series: None,
+            })
+            .collect();
+        return Ok(SingleSearch {
+            items,
+            total_pages: Some(1),
+            has_next: false,
+        });
+    }
     let url = match build_search_url(source, query, page) {
         Some(u) => u,
         None => return Err(format!("no search URL for source {:?}", source)),
@@ -1735,6 +1760,7 @@ fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
         "lmanime" => (Source::Lmanime, "lmanime"),
         "lk21" => (Source::Lk21, "movie"),
         "nekopoi" => (Source::Nekopoi, "nekopoi"),
+        "dramabox" => (Source::Dramabox, "drama"),
         _ => (Source::Mangaball, "unknown"),
     };
     let opaque_kind = match source {
@@ -1744,7 +1770,8 @@ fn raw_search_to_dto(state: &ApiState, raw: SearchResultItem) -> SearchItemDto {
         | Source::Novelid
         | Source::Otakudesu
         | Source::Otakudesufit
-        | Source::Lmanime => Kind::Series,
+        | Source::Lmanime
+        | Source::Dramabox => Kind::Series,
         Source::Cosplaytele | Source::Lk21 | Source::Nekopoi => Kind::Post,
     };
     let id = state.codec.encode(source, opaque_kind, &raw.url);
@@ -1918,6 +1945,7 @@ async fn run_browse(
         "lmanime" => browse_lmanime(state, feed, page).await,
         "lk21" | "movie" | "film" => browse_lk21(state, feed, page).await,
         "nekopoi" | "hentai" => browse_nekopoi(state, feed, page).await,
+        "dramabox" | "drama" | "drachin" => browse_dramabox(state, page).await,
         _ => Err(format!("unknown provider '{}'", provider)),
     }
 }
@@ -2034,6 +2062,38 @@ async fn browse_nekopoi(state: &ApiState, feed: &str, page: u32) -> Result<Brows
     Ok(BrowseResult {
         per_page: items.len().max(1) as u32,
         total_pages,
+        has_next,
+        items,
+    })
+}
+
+/// Map a DramaBox drama card into a unified search item DTO.
+fn drama_card_to_dto(state: &ApiState, c: crate::web::dramabox::DramaCard) -> SearchItemDto {
+    let url = crate::web::dramabox::book_url(&c.book_id);
+    SearchItemDto {
+        id: state.codec.encode(Source::Dramabox, Kind::Series, &url),
+        source: "dramabox".to_string(),
+        kind: "drama".to_string(),
+        title: c.title,
+        thumbnail: proxy_opt(state, c.cover.as_deref()),
+        snippet: None,
+        tags: c.tags,
+        cosplayer: None,
+        character: None,
+        series: None,
+    }
+}
+
+async fn browse_dramabox(state: &ApiState, page: u32) -> Result<BrowseResult, String> {
+    let cards = crate::web::dramabox::theater(state, page).await?;
+    let items: Vec<SearchItemDto> = cards
+        .into_iter()
+        .map(|c| drama_card_to_dto(state, c))
+        .collect();
+    let has_next = !items.is_empty();
+    Ok(BrowseResult {
+        per_page: items.len().max(1) as u32,
+        total_pages: None,
         has_next,
         items,
     })
@@ -3389,8 +3449,13 @@ pub struct NekopoiPostDto {
 pub struct NekopoiServerDto {
     pub name: String,
     pub label: String,
-    /// Directly embeddable player URL (these hosts allow iframing).
+    /// Raw third-party player URL (used as an iframe fallback for hosts we
+    /// can't resolve to a direct stream).
     pub embed_url: String,
+    /// Signed `/api/v1/nekopoi-stream` URL: the client calls this to resolve
+    /// the server to a directly playable (proxied) mp4/hls stream, avoiding
+    /// the "embedding blocked" iframe errors some hosts return.
+    pub resolve: String,
 }
 
 /// `GET /api/v1/nekopoi/{id}` — NekoPoi adult-anime post detail (18+).
@@ -3445,15 +3510,30 @@ pub async fn nekopoi_post(
         cover: proxy_opt(&state, post.cover.as_deref()),
         date: post.date.clone(),
         genres: post.genres.clone(),
-        servers: post
-            .servers
-            .iter()
-            .map(|s| NekopoiServerDto {
-                name: s.name.clone(),
-                label: s.label.clone(),
-                embed_url: s.embed_url.clone(),
-            })
-            .collect(),
+        servers: {
+            // Order servers by how reliably we can play them inline:
+            // StreamWish/Filemoon (resolves to HLS via rustls) first, then
+            // unknown hosts (iframe fallback), then DoodStream clones last
+            // (their WAF often blocks our server's TLS fingerprint).
+            use crate::web::nekopoi_stream::Provider;
+            let rank = |u: &str| match crate::web::nekopoi_stream::detect_provider(u) {
+                Provider::StreamWish => 0,
+                Provider::Unknown => 1,
+                Provider::Dood => 2,
+            };
+            let mut srv: Vec<NekopoiServerDto> = post
+                .servers
+                .iter()
+                .map(|s| NekopoiServerDto {
+                    name: s.name.clone(),
+                    label: s.label.clone(),
+                    embed_url: s.embed_url.clone(),
+                    resolve: signed_nekopoi_stream_url(&state, &s.embed_url),
+                })
+                .collect();
+            srv.sort_by_key(|s| rank(&s.embed_url));
+            srv
+        },
         episodes: post
             .episodes
             .iter()
@@ -3492,6 +3572,99 @@ pub async fn nekopoi_post(
         source_url: post.url.clone(),
     };
     ok(StatusCode::OK, dto, started, cached, &rid)
+}
+
+#[derive(Debug, Serialize)]
+pub struct DramaDetailDto {
+    pub id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub episodes: Vec<DramaEpisodeDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DramaEpisodeDto {
+    pub index: u32,
+    pub title: String,
+    /// Direct CDN video URL (mp4/m3u8) — played inline by the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+}
+
+/// `GET /api/v1/drama/{id}` — DramaBox (drachin) drama detail + episodes.
+pub async fn drama_detail(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+    let dec = match resolve_opaque(&state, &id) {
+        Ok(d) => d,
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "invalid_id",
+                e.to_string(),
+                started,
+                &rid,
+            )
+        }
+    };
+    if dec.source != Source::Dramabox {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "wrong_source",
+            "ID source is not dramabox",
+            started,
+            &rid,
+        );
+    }
+    let book_id = match crate::web::dramabox::book_id_from_url(&dec.url) {
+        Some(b) => b,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_id",
+                "could not recover bookId",
+                started,
+                &rid,
+            )
+        }
+    };
+    match crate::web::dramabox::detail(&state, &book_id).await {
+        Ok(d) => {
+            let dto = DramaDetailDto {
+                id: id.clone(),
+                title: d.title,
+                cover: proxy_opt(&state, d.cover.as_deref()),
+                description: d.description,
+                episodes: d
+                    .episodes
+                    .into_iter()
+                    .map(|e| DramaEpisodeDto {
+                        index: e.index,
+                        title: e.title,
+                        video_url: e.video_url.as_deref().map(|u| {
+                            if u.contains(".m3u8") {
+                                signed_hls_url(&state, u)
+                            } else {
+                                u.to_string()
+                            }
+                        }),
+                        cover: proxy_opt(&state, e.cover.as_deref()),
+                    })
+                    .collect(),
+            };
+            ok(StatusCode::OK, dto, started, false, &rid)
+        }
+        Err(e) => err(StatusCode::BAD_GATEWAY, "scrape_failed", e, started, &rid),
+    }
 }
 
 /// Query for the opaque-ID rehydration endpoint.
@@ -4160,6 +4333,17 @@ pub async fn hls_proxy(
         .unwrap_or_default();
     let referer = if host.contains("cossora") {
         "https://cossora.stream/".to_string()
+    } else if host.contains("mydramawave") || host.contains("dramawave") {
+        "https://mydramawave.com/".to_string()
+    } else if host.contains("streamruby")
+        || host.contains("streampoi")
+        || host.contains("streamwish")
+        || host.contains("filemoon")
+        || host.contains("vidhide")
+    {
+        // StreamWish / Filemoon family (NekoPoi streampoi servers): segments are
+        // locked to the embed origin's referer.
+        "https://streampoi.com/".to_string()
     } else {
         "https://cloud.hownetwork.xyz/".to_string()
     };
@@ -4417,10 +4601,394 @@ pub fn signed_cosplay_video_url(state: &ApiState, embed_url: &str) -> String {
     format!("/api/v1/cosplay-video?p={}&s={}", payload, sig)
 }
 
+/// Build a signed `/api/v1/nekopoi-stream?p=&s=` resolver URL for an embed.
+fn signed_nekopoi_stream_url(state: &ApiState, embed_url: &str) -> String {
+    let payload = URL_SAFE_NO_PAD.encode(embed_url.as_bytes());
+    let sig = state.codec.sign_image(&payload);
+    format!("/api/v1/nekopoi-stream?p={}&s={}", payload, sig)
+}
+
+/// Build a signed `/media?p=&s=` Range-capable media proxy URL.
+fn signed_media_url(state: &ApiState, raw: &str) -> String {
+    let payload = URL_SAFE_NO_PAD.encode(raw.as_bytes());
+    let sig = state.codec.sign_image(&payload);
+    format!("/media?p={}&s={}", payload, sig)
+}
+
 /// Decode a base64url payload (as produced by the signers) back to a string.
 fn decode_signed_url(payload: &str) -> Option<String> {
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
     String::from_utf8(bytes).ok()
+}
+
+/// `GET /api/v1/nekopoi-stream?p=&s=` — resolve a NekoPoi player embed into a
+/// directly playable (proxied) stream.
+///
+/// NekoPoi iframes third-party file hosts; some refuse framing ("embedding
+/// blocked") and all deliver IP-locked media. We crack the two host families
+/// (DoodStream -> direct mp4, StreamWish -> m3u8) server-side and return a
+/// proxied URL the client plays inline. Unknown hosts fall back to an iframe.
+pub async fn nekopoi_stream(
+    State(state): State<ApiState>,
+    Query(q): Query<CosplayVideoQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    if !state.codec.verify_image(&q.p, &q.s) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "bad_signature",
+            "stream resolver signature is invalid",
+            started,
+            &rid,
+        );
+    }
+    let embed = match decode_signed_url(&q.p) {
+        Some(u) => u,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "stream payload is not valid",
+                started,
+                &rid,
+            )
+        }
+    };
+
+    use crate::web::nekopoi_stream::Provider;
+    match crate::web::nekopoi_stream::detect_provider(&embed) {
+        Provider::Dood => match resolve_dood_mp4(&state, &embed).await {
+            Ok(mp4) => ok(
+                StatusCode::OK,
+                serde_json::json!({ "type": "mp4", "url": signed_media_url(&state, &mp4) }),
+                started,
+                false,
+                &rid,
+            ),
+            // If even curl can't resolve it, hand the embed back so the client
+            // offers an "open in a new tab" action (never an ad iframe).
+            Err(_) => ok(
+                StatusCode::OK,
+                serde_json::json!({ "type": "iframe", "url": embed }),
+                started,
+                false,
+                &rid,
+            ),
+        },
+        Provider::StreamWish => match resolve_streamwish_m3u8(&state, &embed).await {
+            Ok(m3u8) => ok(
+                StatusCode::OK,
+                serde_json::json!({ "type": "hls", "url": signed_hls_url(&state, &m3u8) }),
+                started,
+                false,
+                &rid,
+            ),
+            Err(e) => err(StatusCode::BAD_GATEWAY, "resolve_failed", e, started, &rid),
+        },
+        Provider::Unknown => ok(
+            StatusCode::OK,
+            serde_json::json!({ "type": "iframe", "url": embed }),
+            started,
+            false,
+            &rid,
+        ),
+    }
+}
+
+/// Resolve a DoodStream-clone embed to a fresh direct-MP4 URL.
+async fn resolve_dood_mp4(state: &ApiState, embed: &str) -> Result<String, String> {
+    let host = url::Url::parse(embed)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| format!("https://{}", h)))
+        .ok_or("bad embed url")?;
+    let page = fetch_dood(state, embed, "https://nekopoi.care/", false).await?;
+    let path =
+        crate::web::nekopoi_stream::dood_pass_md5_path(&page).ok_or("no pass_md5 in embed page")?;
+    let token = crate::web::nekopoi_stream::dood_token(&path).ok_or("no token in pass_md5 path")?;
+    // The pass_md5 endpoint is an AJAX call: it 403s without an XHR header.
+    let base = fetch_dood(state, &format!("{}{}", host, path), embed, true).await?;
+    let base = base.trim().to_string();
+    if !base.starts_with("http") {
+        return Err("pass_md5 did not return a base url".into());
+    }
+    let nonce = rand_alnum(10);
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    Ok(crate::web::nekopoi_stream::dood_build_final(
+        &base, &nonce, &token, expiry,
+    ))
+}
+
+/// Fetch a DoodStream page/endpoint via the system `curl`.
+///
+/// playmogo & co. sit behind a WAF that fingerprints the TLS handshake and
+/// 403s anything that isn't a real browser/curl. We could not match that
+/// fingerprint from reqwest with either rustls *or* native-tls (both still get
+/// 403), but the system `curl` — which uses the VPS's own OpenSSL — is accepted
+/// (verified live). So for these hosts we shell out to `curl`, passing args as
+/// a vector (no shell) so the URL can't inject. If `curl` is missing or fails,
+/// the caller falls back to an "open in a new tab" action.
+async fn fetch_dood(
+    _state: &ApiState,
+    url: &str,
+    referer: &str,
+    xhr: bool,
+) -> Result<String, String> {
+    const DOOD_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    let mut cmd = tokio::process::Command::new("curl");
+    cmd.arg("-s")
+        .arg("--fail")
+        .arg("--compressed")
+        .arg("--proto")
+        .arg("=https")
+        .arg("--max-time")
+        .arg("20")
+        .arg("-A")
+        .arg(DOOD_UA)
+        .arg("-e")
+        .arg(referer);
+    if xhr {
+        cmd.arg("-H").arg("X-Requested-With: XMLHttpRequest");
+    }
+    cmd.arg("--").arg(url);
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("curl unavailable: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("curl failed ({})", out.status));
+    }
+    let body = String::from_utf8_lossy(&out.stdout).to_string();
+    if body.trim().is_empty() {
+        return Err("curl returned an empty body".into());
+    }
+    Ok(body)
+}
+
+/// Resolve a StreamWish/Filemoon-clone embed to its `.m3u8` master playlist.
+async fn resolve_streamwish_m3u8(state: &ApiState, embed: &str) -> Result<String, String> {
+    let page = fetch_dood(state, embed, "https://nekopoi.care/", false).await?;
+    crate::web::nekopoi_stream::streamwish_m3u8(&page).ok_or_else(|| "no m3u8 in embed page".into())
+}
+
+/// Generate an alphanumeric nonce of `n` chars (DoodStream `makePlay` nonce).
+fn rand_alnum(n: usize) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut out = String::with_capacity(n);
+    while out.len() < n {
+        for b in uuid::Uuid::new_v4().as_bytes() {
+            if out.len() >= n {
+                break;
+            }
+            out.push(CHARS[(*b as usize) % CHARS.len()] as char);
+        }
+    }
+    out
+}
+
+/// `GET /media?p=&s=` — Range-capable streaming proxy for IP-locked media
+/// (e.g. DoodStream `.mp4` files whose token is bound to our server IP).
+///
+/// The DoodStream CDNs (cloudatacdn etc.) fingerprint-block reqwest's TLS the
+/// same way the player host does, so — like the resolver — we stream the file
+/// through the system `curl` (the VPS's OpenSSL), forwarding the client's
+/// `Range` header and relaying the upstream status + Content-Range/Length so
+/// seeking works. The body is piped straight through without buffering.
+pub async fn media_proxy(
+    State(state): State<ApiState>,
+    Query(q): Query<CosplayVideoQuery>,
+    req: Request,
+) -> Response {
+    let started = Instant::now();
+    let rid = req_id(req.headers());
+
+    if !state.codec.verify_image(&q.p, &q.s) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "bad_signature",
+            "media proxy signature is invalid",
+            started,
+            &rid,
+        );
+    }
+    let url = match decode_signed_url(&q.p) {
+        Some(u) => u,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "bad_payload",
+                "media payload is not valid",
+                started,
+                &rid,
+            )
+        }
+    };
+    // Reuse the HLS SSRF guard: only public hosts, no loopback/private/internal.
+    if is_blocked_hls_target(&url) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "host_not_allowed",
+            "media proxy will not fetch this host",
+            started,
+            &rid,
+        );
+    }
+
+    let range = req
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    match curl_stream(&url, range.as_deref()).await {
+        Ok(resp) => resp,
+        Err(e) => err(StatusCode::BAD_GATEWAY, "upstream_error", e, started, &rid),
+    }
+}
+
+/// Spawn `curl` to fetch `url` (optionally with a `Range`), parse its response
+/// head, and return an axum `Response` whose body streams curl's stdout.
+async fn curl_stream(url: &str, range: Option<&str>) -> Result<Response, String> {
+    use std::process::Stdio;
+    const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    let mut cmd = tokio::process::Command::new("curl");
+    cmd.arg("-s")
+        .arg("-L")
+        .arg("--max-redirs")
+        .arg("5")
+        .arg("--proto")
+        .arg("=https")
+        .arg("--proto-redir")
+        .arg("=https,http")
+        .arg("--connect-timeout")
+        .arg("15")
+        // Abort a stalled transfer (no progress) instead of hanging forever,
+        // but don't cap total time so long videos can stream fully.
+        .arg("--speed-limit")
+        .arg("1")
+        .arg("--speed-time")
+        .arg("30")
+        .arg("-D")
+        .arg("-") // dump response headers to stdout, then the body
+        .arg("-A")
+        .arg(UA);
+    if let Some(r) = range {
+        // Validate the Range value to avoid passing arbitrary args.
+        if r.starts_with("bytes=") && r.len() < 128 && !r.contains(['\r', '\n', ' ']) {
+            cmd.arg("-H").arg(format!("Range: {r}"));
+        }
+    }
+    cmd.arg("--").arg(url);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+
+    let mut child = cmd.spawn().map_err(|e| format!("curl unavailable: {e}"))?;
+    let mut stdout = child.stdout.take().ok_or("curl: no stdout")?;
+    // Reap the process in the background (also kills curl if the body stream is
+    // dropped, e.g. the client disconnects -> SIGPIPE on stdout).
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+
+    let (status, headers, leftover) = read_http_head(&mut stdout).await?;
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        return Err(format!("upstream returned {status}"));
+    }
+
+    use futures::stream::{self, StreamExt};
+    use tokio_util::io::ReaderStream;
+    let lead = stream::once(async move {
+        Ok::<axum::body::Bytes, std::io::Error>(axum::body::Bytes::from(leftover))
+    });
+    let rest = ReaderStream::new(stdout);
+    let body = axum::body::Body::from_stream(lead.chain(rest));
+    Ok((status, headers, body).into_response())
+}
+
+/// Read an HTTP response head (status line + headers) from a reader until the
+/// blank `\r\n\r\n` line, returning the status, a curated header map, and any
+/// body bytes already read past the head.
+async fn read_http_head<R>(r: &mut R) -> Result<(StatusCode, HeaderMap, Vec<u8>), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf: Vec<u8> = Vec::with_capacity(2048);
+    let mut tmp = [0u8; 1024];
+    let sep = b"\r\n\r\n";
+    loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == sep) {
+            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+            let rest = buf[pos + 4..].to_vec();
+            let (status, headers) = parse_response_head(&head);
+            // `curl -L` prints the header block of each redirect hop (302/301/…)
+            // before the final response. Skip those and keep scanning so we
+            // relay the final 200/206 headers + body, not the redirect.
+            if status.is_redirection() {
+                buf = rest;
+                continue;
+            }
+            return Ok((status, headers, rest));
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("curl: response head too large".into());
+        }
+        let n = r.read(&mut tmp).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("curl closed before sending headers".into());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+}
+
+/// Parse the status line + headers of an HTTP response head into a curated
+/// header map carrying only what a media player needs.
+fn parse_response_head(head: &str) -> (StatusCode, HeaderMap) {
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .and_then(|c| StatusCode::from_u16(c).ok())
+        .unwrap_or(StatusCode::OK);
+
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let k = k.trim().to_ascii_lowercase();
+            let v = v.trim();
+            let keep = matches!(
+                k.as_str(),
+                "content-type" | "content-length" | "content-range" | "accept-ranges"
+            );
+            if keep {
+                if let (Ok(name), Ok(val)) = (
+                    header::HeaderName::from_bytes(k.as_bytes()),
+                    HeaderValue::from_str(v),
+                ) {
+                    headers.insert(name, val);
+                }
+            }
+        }
+    }
+    if !headers.contains_key(header::ACCEPT_RANGES) {
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    }
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    (status, headers)
 }
 
 /// Fetch a URL as text using a browser fingerprint and a specific Referer,
@@ -5390,6 +5958,14 @@ fn is_allowed_image_host(url: &str) -> bool {
     }
     // NekoPoi (covers on the main domain /wp-content + any wp/cdn subdomain)
     if host == "nekopoi.care" || host.ends_with(".nekopoi.care") || host.contains("nekopoi.") {
+        return true;
+    }
+    // DramaBox (drachin) covers + video posters on the dramaboxdb CDN
+    if host.contains("dramaboxdb.com") || host.contains("dramabox") {
+        return true;
+    }
+    // DramaWave / mydramawave (drachin) covers + posters + their CDN
+    if host.contains("mydramawave.com") || host.contains("dramawave") {
         return true;
     }
 

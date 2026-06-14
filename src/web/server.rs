@@ -78,6 +78,8 @@ pub fn build_router(state: ApiState, static_dir: &str) -> Router {
         .route("/api/v1/movie/{id}", get(api::lk21_movie))
         .route("/api/v1/movie-stream/{id}", get(api::movie_stream))
         .route("/api/v1/nekopoi/{id}", get(api::nekopoi_post))
+        .route("/api/v1/nekopoi-stream", get(api::nekopoi_stream))
+        .route("/api/v1/drama/{id}", get(api::drama_detail))
         .route("/api/v1/cosplay/{id}", get(api::cosplay_post))
         .route("/api/v1/cosplay-video", get(api::cosplay_video))
         .route("/api/v1/novel/{id}", get(api::novel_series))
@@ -89,6 +91,8 @@ pub fn build_router(state: ApiState, static_dir: &str) -> Router {
         .route("/img", get(api::img_proxy))
         // HLS playlist/segment proxy (cosplay video streams)
         .route("/hls", get(api::hls_proxy))
+        // Range-capable media proxy (IP-locked mp4 files, e.g. NekoPoi dood)
+        .route("/media", get(api::media_proxy))
         // Static assets / verification files served from `static_dir`.
         // Single-segment only (e.g. /google1234.html, /ads.txt, /logo.svg) so
         // it never shadows the API or SPA routes.

@@ -153,6 +153,24 @@
       fail("Your browser cannot play this video", src);
     }catch(e){ fail(e.message || "Failed to load video"); }
   }
+
+  // ---- Hardened player iframe (Brave-style ad/pop-up blocking) ------------
+  // Third-party video hosts (playmogo/dood, streampoi, donghua/anime mirrors,
+  // movie embeds) are ad-funded and fire pop-ups, pop-unders and forced
+  // new-tab / top-window redirects. For embeds we can't resolve to a direct
+  // stream we still have to iframe them, but we wrap them in a strict sandbox
+  // that lets the player run and play video while blocking the ad behaviour:
+  //   - NO allow-popups / allow-popups-to-escape-sandbox  -> window.open()/pop-unders blocked
+  //   - NO allow-top-navigation*                          -> can't redirect or hijack our tab
+  //   - NO allow-modals                                   -> no interstitial ad dialogs
+  //   - allow-scripts + allow-same-origin                 -> player still runs & plays
+  // This is the same principle Brave uses for cross-origin frames we can't
+  // rewrite: contain them so ads can't escape the box.
+  const PLAYER_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock";
+  function playerIframe(src, id){
+    const idAttr = id ? ` id="${id}"` : "";
+    return `<iframe${idAttr} src="${escAttr(src)}" loading="lazy" referrerpolicy="origin" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture" sandbox="${PLAYER_SANDBOX}"></iframe>`;
+  }
   // Footer: operator-configurable. Empty -> minimal "name (c) year".
   function footerHtml(){
     if(BRAND.footer && BRAND.footer.trim()) return BRAND.footer;
@@ -197,6 +215,7 @@
     donghua: { label: "Donghua", api: "anichin",     kind: "donghua", adult: false, icon: I.donghua },
     lmanime: { label: "Anime EN", api: "lmanime",    kind: "lmanime", adult: false, icon: I.anime },
     movie:   { label: "Movies",   api: "lk21",       kind: "movie",   adult: false, icon: I.donghua },
+    drama:   { label: "Drama",    api: "dramabox",   kind: "drama",   adult: false, icon: I.donghua },
     manga:   { label: "Comics",  api: "mangaball",   kind: "manga",   adult: false, icon: I.manga },
     novel:   { label: "Novel",   api: "novelid",     kind: "novel",   adult: false, icon: I.novel },
     cosplay: { label: "Cosplay", api: "cosplaytele", kind: "cosplay", adult: true,  icon: I.cosplay },
@@ -223,9 +242,10 @@
     cosplaytele: [["home","Latest"]],
     nhentai:     [["popular-today","Popular Today"],["popular-week","Popular Week"],["popular","All Time"],["home","Recent"]],
     nekopoi:     [["latest","Latest"],["hentai","Hentai"],["3d","3D"],["2d","2D Animation"],["jav","JAV"],["jav-cosplay","JAV Cosplay"]],
+    dramabox:    [["latest","Latest"]],
   };
 
-  const DETAIL_EP = { anime:"anime", donghua:"donghua", lmanime:"lmanime", movie:"movie", manga:"manga", novel:"novel", cosplay:"cosplay", doujin:"nhentai", nekopoi:"nekopoi" };
+  const DETAIL_EP = { anime:"anime", donghua:"donghua", lmanime:"lmanime", movie:"movie", manga:"manga", novel:"novel", cosplay:"cosplay", doujin:"nhentai", nekopoi:"nekopoi", drama:"drama" };
 
   // ---- Preferences --------------------------------------------------------
   const store = {
@@ -845,6 +865,7 @@
       ["donghua", "#/browse/donghua", "Donghua", I.donghua, false],
       ["lmanime", "#/browse/lmanime", "Anime EN", I.anime, false],
       ["movie", "#/browse/movie", "Movies", I.donghua, false],
+      ["drama", "#/browse/drama", "Drama", I.donghua, false],
       ["manga", "#/browse/manga", "Comics", I.manga, false],
       ["novel", "#/browse/novel", "Novel", I.novel, false],
       ["schedule", "#/schedule", "Schedule", I.calendar, false],
@@ -1574,10 +1595,18 @@
     if(!kind || !id) return;
     const ep = DETAIL_EP[kind];
     if(!ep) return;
-    if(kind==="cosplay") prefetch(`/cosplay/${encodeURIComponent(id)}`);
-    else if(kind==="doujin") prefetch(`/nhentai/${encodeURIComponent(id)}`);
-    else if(kind==="donghua") prefetch(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size:EPISODE_SIZE})}`);
-    else prefetch(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size:CHAPTER_SIZE})}`);
+    const eid = encodeURIComponent(id);
+    // Warm the EXACT path the detail route fetches for this kind, so the
+    // cache-peek can hit it (a mismatched key both wastes the fetch and, worse,
+    // can route the wrong renderer).
+    if(kind==="anime" || kind==="lmanime"){ const cfg = ANIME_LIKE[kind]; prefetch(`/${cfg.api}/${eid}`); }
+    else if(kind==="cosplay") prefetch(`/cosplay/${eid}`);
+    else if(kind==="doujin") prefetch(`/nhentai/${eid}`);
+    else if(kind==="movie") prefetch(`/movie/${eid}`);
+    else if(kind==="nekopoi") prefetch(`/nekopoi/${eid}`);
+    else if(kind==="drama") prefetch(`/drama/${eid}`);
+    else if(kind==="donghua") prefetch(`/${ep}/${eid}?${qs({page:1,size:EPISODE_SIZE})}`);
+    else prefetch(`/${ep}/${eid}?${qs({page:1,size:CHAPTER_SIZE})}`);
   }
   document.addEventListener("pointerenter", (e)=>{
     const el = e.target.closest && e.target.closest("[data-prefetch-kind]");
@@ -2216,6 +2245,7 @@
     if(kind==="lmanime") return renderAnimeSeries(id, data, "lmanime");
     if(kind==="movie")   return renderMovie(id, data);
     if(kind==="nekopoi") return renderNekopoi(id, data);
+    if(kind==="drama")   return renderDrama(id, data);
     if(kind==="donghua") return renderDonghuaSeries(id, data);
     return renderReadableSeries(kind, id, data, 1);
   }
@@ -2303,14 +2333,14 @@
       const cfg = ANIME_LIKE[kind];
       const cached = peek(`/${cfg.api}/${encodeURIComponent(id)}`);
       if(cached){ shell(`<div id="d"></div>`); return renderAnimeSeries(id, cached, kind); }
-    } else if(kind!=="cosplay" && kind!=="doujin" && kind!=="movie"){
+    } else if(kind==="donghua" || kind==="manga" || kind==="novel"){
       const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
       const cached = peek(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`);
       if(cached){
         shell(`<div id="d"></div>`);
         return kind==="donghua" ? renderDonghuaSeries(id, cached) : renderReadableSeries(kind, id, cached, 1);
       }
-    } else {
+    } else if(kind==="cosplay" || kind==="doujin" || kind==="movie" || kind==="nekopoi"){
       const path = kind==="cosplay" ? `/cosplay/${encodeURIComponent(id)}`
         : kind==="movie" ? `/movie/${encodeURIComponent(id)}`
         : kind==="nekopoi" ? `/nekopoi/${encodeURIComponent(id)}`
@@ -2318,6 +2348,7 @@
       const cached = peek(path);
       if(cached){ shell(`<div id="d"></div>`); return kind==="cosplay" ? renderCosplay(id) : kind==="movie" ? renderMovie(id, cached) : kind==="nekopoi" ? renderNekopoi(id, cached) : renderDoujin(id); }
     }
+    // drama (and any other kind): no cache-peek; handled by the main fetch below.
 
     shell(`<div id="d">${spinner}</div>`);
 
@@ -2341,6 +2372,7 @@
       if(kind==="doujin") return renderDoujin(id);
       if(kind==="movie"){ const data = await apiCached(`/movie/${encodeURIComponent(id)}`); return renderMovie(id, data); }
       if(kind==="nekopoi"){ const data = await apiCached(`/nekopoi/${encodeURIComponent(id)}`); return renderNekopoi(id, data); }
+      if(kind==="drama"){ const data = await apiCached(`/drama/${encodeURIComponent(id)}`); return renderDrama(id, data); }
       if(kind==="anime" || kind==="lmanime"){ const cfg = ANIME_LIKE[kind]; const data = await apiCached(`/${cfg.api}/${encodeURIComponent(id)}`); return renderAnimeSeries(id, data, kind); }
       const size = kind==="donghua" ? EPISODE_SIZE : CHAPTER_SIZE;
       const data = await apiCached(`/${ep}/${encodeURIComponent(id)}?${qs({page:1,size})}`);
@@ -2483,7 +2515,7 @@
             attachHlsSrc(host.querySelector("video"), "m", res.url);
           } else if(res && res.type==="iframe" && res.url){
             host.innerHTML = `<div class="embed-frame">
-                <iframe src="${escAttr(res.url)}" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="origin"></iframe>
+                ${playerIframe(res.url)}
               </div>
               <div class="embed-help">Some servers only allow playback on their own site. If the video shows an "embedding blocked" message, <a href="${escAttr(res.url)}" target="_blank" rel="noopener noreferrer">open it in a new tab ${I.arrow}</a>. The <b>P2P</b> server always plays directly here.${dlNote}</div>`;
           } else {
@@ -2515,11 +2547,10 @@
     const actions = favButton(favMeta);
 
     const servers = Array.isArray(data.servers) ? data.servers : [];
-    const initial = servers[0] ? servers[0].embed_url : "";
     const playerBlock = servers.length
-      ? `<div class="server-switch">${servers.map((s,i)=>`<button class="ss-btn${i===0?" active":""}" data-embed="${escAttr(s.embed_url)}">${h(s.label||("Server "+(i+1)))}</button>`).join("")}</div>`+
-        `<div id="neko-player" class="movie-player"><div class="embed-frame"><iframe id="neko-frame" src="${escAttr(initial)}" allowfullscreen allow="autoplay; fullscreen; encrypted-media; picture-in-picture" referrerpolicy="origin"></iframe></div></div>`+
-        `<div class="embed-help">If a server shows an "embedding blocked" message, <a id="neko-open" href="${escAttr(initial)}" target="_blank" rel="noopener noreferrer">open it in a new tab ${I.arrow}</a> or switch servers above.</div>`
+      ? `<div class="server-switch"><span class="ss-label">${I.play} Server</span>${servers.map((s,i)=>`<button class="ss-btn${i===0?" active":""}" data-resolve="${escAttr(s.resolve||"")}" data-embed="${escAttr(s.embed_url)}">${h(s.label||("Server "+(i+1)))}</button>`).join("")}</div>`+
+        `<div id="neko-player" class="movie-player">${spinner}</div>`+
+        `<div class="embed-help">If a server fails to play, switch to another above or <a id="neko-open" href="${escAttr(servers[0].embed_url)}" target="_blank" rel="noopener noreferrer">open the source in a new tab ${I.arrow}</a>.</div>`
       : `<div class="server-note">No streaming server found.</div>`;
 
     // Download groups -> quality + mirror buttons.
@@ -2554,16 +2585,110 @@
       watchBlock+episodesBlock+relatedBlock
     );
 
-    // Server switcher: swap the iframe src directly (these players embed).
-    document.querySelectorAll(".server-switch .ss-btn").forEach(btn=>{
+    // Server resolver with a built-in ad-blocking policy: we only ever play
+    // streams INLINE that we could crack server-side into a clean mp4/hls
+    // (StreamWish/streampoi, and DoodStream when its WAF lets us through).
+    // Ad-funded hosts that can only be iframed (playmogo/dood when blocked,
+    // unknown players) are NEVER embedded — their iframes inject pop-ups and
+    // self-navigate to unframeable ad pages (noxiousback.com etc.), breaking
+    // the player. Instead we surface a clean "open in a new tab" action and,
+    // on auto-load, skip straight to a server we can play inline & ad-free.
+    if(!servers.length) return;
+    const btns = Array.from(document.querySelectorAll(".server-switch .ss-btn"));
+    const setActive = (btn)=> btns.forEach(b=>b.classList.toggle("active", b===btn));
+    async function loadNekoServer(idx, autoAdvance){
+      const btn = btns[idx];
+      if(!btn) return;
+      setActive(btn);
+      const host = document.getElementById("neko-player");
+      const open = document.getElementById("neko-open");
+      if(open && btn.dataset.embed) open.href = btn.dataset.embed;
+      if(!host) return;
+      host.innerHTML = spinner;
+      // This server can't be played inline (ad host / anti-embed). During an
+      // auto-load, skip to the next server hunting for an inline one; only if
+      // none is inline-playable do we offer the external-open card here.
+      const notInline = ()=>{
+        if(autoAdvance && idx + 1 < btns.length){ loadNekoServer(idx+1, true); return; }
+        host.innerHTML = `<div class="server-note">Server <b>${escHtml((btn.textContent||"ini").trim())}</b> pakai proteksi anti-embed + iklan, jadi tak bisa diputar langsung di sini tanpa iklan.</div>`+
+          `<a class="btn primary block" href="${escAttr(btn.dataset.embed)}" target="_blank" rel="noopener noreferrer nofollow">Buka player di tab baru ${I.arrow}</a>`+
+          `<div class="embed-help">Pilih server lain di atas untuk menonton langsung di sini, bebas iklan.</div>`;
+      };
+      try{
+        if(!btn.dataset.resolve){ notInline(); return; }
+        const rel = btn.dataset.resolve.replace(/^.*\/api\/v1/, "");
+        const res = await api(rel);
+        if(res && res.type==="mp4" && res.url){
+          host.innerHTML = `<div class="video-wrap"><video id="neko-video" controls preload="metadata" playsinline webkit-playsinline src="${escAttr(res.url)}"></video></div>`;
+          const v=document.getElementById("neko-video");
+          if(v){
+            // If the proxied CDN file fails to play (e.g. its edge node is
+            // unreachable / token expired), fall back gracefully instead of
+            // leaving a broken player.
+            v.onerror=()=>notInline();
+            v.play().catch(()=>{});
+          }
+        } else if(res && res.type==="hls" && res.url){
+          host.innerHTML = `<div class="video-wrap hls"><video id="neko-video" controls preload="metadata" playsinline webkit-playsinline></video><div class="hls-state" id="hls-state-neko">${spinner}</div></div>`;
+          attachHlsSrc(document.getElementById("neko-video"), "neko", res.url);
+        } else {
+          // type === "iframe" (or anything non-inline): do NOT embed the ad host.
+          notInline(); return;
+        }
+        void pstore.recordHistory(Object.assign({}, favMeta, { timestamp: Date.now() }));
+      }catch(e){
+        notInline();
+      }
+    }
+    btns.forEach((btn,i)=> btn.addEventListener("click", ()=> loadNekoServer(i, false)));
+    // Auto-load the first server, auto-advancing to the first inline-playable one.
+    loadNekoServer(0, true);
+  }
+
+  // DramaBox / DramaWave (drachin) drama: a vertical short-drama with many
+  // episodes, each an HLS (.m3u8) stream proxied through /hls. We play the
+  // selected episode inline with hls.js (same engine as movies/cosplay) and
+  // offer an episode grid. Mobile + desktop friendly (responsive, playsinline).
+  function renderDrama(id, data){
+    const eps = (data.episodes||[]).filter(e=>e && e.video_url);
+    const favMeta = { opaqueId: data.id||id, title: data.title, thumbnail: data.cover, kind: "drama", timestamp: Date.now() };
+    void pstore.recordHistory(favMeta);
+    const facts = [
+      eps.length?`<span class="pill">${eps.length} eps</span>`:"",
+    ].join("");
+    const actions = favButton(favMeta);
+
+    const playerBlock = eps.length
+      ? `<div class="movie-player"><div class="video-wrap hls"><video id="drama-video" controls preload="metadata" playsinline webkit-playsinline></video><div class="hls-state" id="hls-state-drama">${spinner}</div></div></div>`+
+        `<div class="ep-list" id="dramaEps">${eps.map((e,i)=>`<button class="ep-btn center${i===0?" active":""}" data-ep="${i}" data-src="${escAttr(e.video_url)}" data-num="${e.index}">Ep ${e.index}</button>`).join("")}</div>`
+      : `<div class="server-note">No episodes available for this drama.</div>`;
+
+    setD(
+      heroHtml("drama","Drama",{title:data.title},facts,actions,data.description,data.cover)+
+      (eps.length?`<div class="row-head"><h2><span class="dot"></span>Watch</h2></div>`:"")+
+      playerBlock
+    );
+
+    if(!eps.length) return;
+
+    // Episode switching: re-attach the HLS source + record progress so the
+    // library shows the last episode watched.
+    const video = document.getElementById("drama-video");
+    const play = (src, num)=>{
+      const st = document.getElementById("hls-state-drama");
+      if(st) st.innerHTML = spinner;
+      attachHlsSrc(video, "drama", src);
+      void pstore.recordHistory(Object.assign({}, favMeta, { progress:{ type:"episode", number: Number(num), label:"Ep "+num }, timestamp: Date.now() }));
+    };
+    document.querySelectorAll("#dramaEps .ep-btn").forEach(btn=>{
       btn.addEventListener("click", ()=>{
-        document.querySelectorAll(".server-switch .ss-btn").forEach(b=>b.classList.toggle("active", b===btn));
-        const frame = document.getElementById("neko-frame");
-        const open = document.getElementById("neko-open");
-        if(frame) frame.src = btn.dataset.embed;
-        if(open) open.href = btn.dataset.embed;
+        document.querySelectorAll("#dramaEps .ep-btn").forEach(b=>b.classList.toggle("active", b===btn));
+        play(btn.dataset.src, btn.dataset.num);
+        if(video) video.play().catch(()=>{});
       });
     });
+    // Auto-load the first episode.
+    play(eps[0].video_url, eps[0].index);
   }
 
   // Render a "Rekomendasi" row at the bottom of a detail page, sourced from
@@ -2925,7 +3050,7 @@
       void pstore.recordHistory({ opaqueId: e.series_id||id, title: e.series_title, kind: "donghua", thumbnail: e.thumbnail||e.cover||e.poster||null, progress: { type: "episode", number: e.episode_number, id, label: (e.episode_number!=null?("Ep "+e.episode_number):(e.title||null)) }, timestamp: Date.now() });
       const servers = e.servers||[];
       const seriesLink = e.series_id?`#/detail/donghua/${encodeURIComponent(e.series_id)}`:"#/";
-      const player = servers.length?`<div class="player-wrap"><div class="frame"><iframe id="player" src="${h(servers[0].embed_url)}" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture"></iframe></div></div>`:`<div class="empty">No video servers available.</div>`;
+      const player = servers.length?`<div class="player-wrap"><div class="frame">${playerIframe(servers[0].embed_url, "player")}</div></div>`:`<div class="empty">No video servers available.</div>`;
       const bar = servers.length?`<div class="server-bar"><span class="lbl">Server:</span>${servers.map((s,i)=>`<button class="srv ${i===0?"active":""}" data-src="${h(s.embed_url)}">${h(s.label)}${s.format?` &middot; ${h(s.format)}`:""}</button>`).join("")}</div>`:"";
       const dls = (e.downloads||[]).map(g=>`<div class="dl-group"><div class="q">${h(g.quality)}</div><div class="mirrors">${(g.mirrors||[]).map(m=>`<a class="btn sm" target="_blank" rel="noopener" href="${h(m.url)}">${h(m.name)}</a>`).join("")}</div></div>`).join("");
       const nav = `<div class="server-bar" style="margin-top:8px">
@@ -2969,7 +3094,7 @@
       const epLabel = e.episode_number!=null ? `Episode ${e.episode_number}` : "Episode";
       // Initial player = default embed if present, else nothing (resolved on click).
       const initial = e.default_embed || "";
-      const player = `<div class="player-wrap"><div class="frame">${initial?`<iframe id="player" src="${h(initial)}" allowfullscreen allow="autoplay; encrypted-media; fullscreen; picture-in-picture"></iframe>`:`<div class="empty" id="playerEmpty">Select a server below.</div>`}</div></div>`;
+      const player = `<div class="player-wrap"><div class="frame">${initial?playerIframe(initial, "player"):`<div class="empty" id="playerEmpty">Select a server below.</div>`}</div></div>`;
       // Group mirrors by quality.
       const byQ = {};
       mirrors.forEach(m=>{ (byQ[m.quality]=byQ[m.quality]||[]).push(m); });
@@ -2999,7 +3124,7 @@
           frame.innerHTML = `<div class="empty">${spinner}</div>`;
           try{
             const r = await api(`/${cfg.stream}?${qs({id: btn.dataset.stream})}`);
-            frame.innerHTML = `<iframe id="player" src="${h(r.url)}" allowfullscreen allow="autoplay; encrypted-media; fullscreen; picture-in-picture"></iframe>`;
+            frame.innerHTML = playerIframe(r.url, "player");
           }catch(err){
             frame.innerHTML = `<div class="empty">Failed to load server. Try another one.</div>`;
           }

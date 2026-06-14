@@ -30,6 +30,8 @@ pub enum SearchSource {
     Lk21,
     /// NekoPoi adult anime — `/search/<q>` HTML results
     Nekopoi,
+    /// DramaBox (drachin) — JSON API keyword search
+    Dramabox,
 }
 
 impl SearchSource {
@@ -46,6 +48,7 @@ impl SearchSource {
             SearchSource::Lmanime => "lmanime",
             SearchSource::Lk21 => "lk21",
             SearchSource::Nekopoi => "nekopoi",
+            SearchSource::Dramabox => "dramabox",
         }
     }
 
@@ -62,6 +65,7 @@ impl SearchSource {
             "lmanime" | "lm" => Some(Self::Lmanime),
             "lk21" | "movie" | "film" => Some(Self::Lk21),
             "nekopoi" | "neko" | "hentai" | "np" => Some(Self::Nekopoi),
+            "dramabox" | "drama" | "drachin" | "db" => Some(Self::Dramabox),
             _ => None,
         }
     }
@@ -111,6 +115,7 @@ pub fn build_search_url(source: SearchSource, query: &str, page: u32) -> Option<
             query,
             page.max(1),
         )),
+        SearchSource::Dramabox => None, // JSON API (separate path)
     }
 }
 
@@ -329,6 +334,7 @@ pub fn parse_search_html(
         SearchSource::Lmanime => parse_lmanime_search(base_url, html),
         SearchSource::Lk21 => Vec::new(), // browse/search use dedicated parsers
         SearchSource::Nekopoi => parse_nekopoi_search(base_url, html),
+        SearchSource::Dramabox => Vec::new(), // JSON API (separate path)
     }
 }
 

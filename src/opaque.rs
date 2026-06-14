@@ -50,6 +50,7 @@ pub enum Source {
     Lk21,
     Otakudesufit,
     Nekopoi,
+    Dramabox,
 }
 
 impl Source {
@@ -65,6 +66,7 @@ impl Source {
             Source::Lk21 => "lk",
             Source::Otakudesufit => "of",
             Source::Nekopoi => "np",
+            Source::Dramabox => "db",
         }
     }
 
@@ -80,6 +82,7 @@ impl Source {
             "lk" => Some(Self::Lk21),
             "of" => Some(Self::Otakudesufit),
             "np" => Some(Self::Nekopoi),
+            "db" => Some(Self::Dramabox),
             _ => None,
         }
     }
@@ -108,6 +111,12 @@ impl Source {
             Some(Self::Lk21)
         } else if u.contains("nekopoi") {
             Some(Self::Nekopoi)
+        } else if u.contains("dramaboxdb.com")
+            || u.contains("dramabox")
+            || u.contains("mydramawave.com")
+            || u.contains("dramawave")
+        {
+            Some(Self::Dramabox)
         } else {
             None
         }
